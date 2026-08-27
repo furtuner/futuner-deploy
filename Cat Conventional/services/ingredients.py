@@ -26,7 +26,7 @@ import pandas as pd
 from collections import defaultdict
 
 # ---- CSV locations (project root) ----
-ROOT = Path(__file__).resolve().parents[2]  # services -> backend -> project root
+ROOT = Path(__file__).resolve().parents[1]  # services -> project root
 FIXED_CSV = ROOT / "fixed_ingredients_corrected.csv"
 USER_CSV  = ROOT / "user_ingredients_corrected.csv"
 
