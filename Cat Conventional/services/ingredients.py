@@ -504,25 +504,25 @@ def get_ingredients_grouped_by_category() -> Dict[str, Dict[str, Any]]:
         "Meat Group B": {
             "items": grouped.get("Meat Group B", []),
             "label": "02 Meat Group B (Optional - Pick up to one)",
-            "mandatory": False, "min_selections": 0, "max_selections": 1,
+            "mandatory": False, "min_selections": 0, "max_selections": 2,
             "notes": "Optional."
         },
         "Meat Group C": {
             "items": grouped.get("Meat Group C", []),
             "label": "03 Meat Group C (Optional - Pick up to one)",
-            "mandatory": False, "min_selections": 0, "max_selections": 1,
+            "mandatory": False, "min_selections": 0, "max_selections": 2,
             "notes": "Optional."
         },
         "Organ Meat (Other)": {
             "items": grouped.get("Organ Meat (Other)", []),
             "label": "04 Organ Meat - Other (Optional - Pick up to one)",
-            "mandatory": False, "min_selections": 0, "max_selections": 1,
+            "mandatory": False, "min_selections": 0, "max_selections": 3,
             "notes": "Optional: 35g when selected."
         },
         "Organ Meat (Liver)": {
             "items": grouped.get("Organ Meat (Liver)", []),
             "label": "05 Organ Meat - Liver (Mandatory - Select one)",
-            "mandatory": True, "min_selections": 1, "max_selections": 1,
+            "mandatory": True, "min_selections": 1, "max_selections": 2,
             "notes": "Mandatory: 160g always."
         },
         "Grain A": {
@@ -569,7 +569,7 @@ def get_ingredients_grouped_by_category() -> Dict[str, Dict[str, Any]]:
         },
         "Fiber": {
             "items": grouped.get("Fiber", []),
-            "label": "13 Others (Optional - Pick up to two maximum)",
+            "label": "13 Fiver & Seeds (Optional - Pick up to two maximum)",
             "mandatory": False, "min_selections": 0, "max_selections": 2,
             "notes": f"Optional: Max {FIBER_SUPP_MAX_G}g total."
         },
