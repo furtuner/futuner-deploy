@@ -57,7 +57,7 @@ def user_ingredients():
         "Vegetable C":        "10 Vegetable C - Potatoes (Optional - Pick up to one)",
         "Fruit":              "11 Fruit (Optional - Up to two maximum)",
         "Oil":                "12 Oil (Mandatory - Select at least one and a maximum of three)",
-        "Fiber":              "13 Fiber & Seeds (Optional - Pick up to two maximum)",
+        "Fiber":              "13 Others (Optional - Pick up to two maximum)",
         "Mineral Group A":    "14 Mineral Group A",
     }
 
