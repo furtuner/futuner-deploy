@@ -491,12 +491,8 @@ def get_ingredients_grouped_by_category() -> Dict[str, Dict[str, Any]]:
     grouped = defaultdict(list)
     for ingredient in ingredients:
         grouped[ingredient["display_group_name"]].append(ingredient)
-    # NOTE: Meat Group A/B/C are intentionally left in CSV row order (a
-    # deliberate custom display order), everything else stays alphabetical.
-    CUSTOM_ORDER_CATEGORIES = {"Meat Group A", "Meat Group B", "Meat Group C"}
     for category in grouped:
-        if category not in CUSTOM_ORDER_CATEGORIES:
-            grouped[category].sort(key=lambda x: x["ingredient_name"].lower())
+        grouped[category].sort(key=lambda x: x["ingredient_name"].lower())
 
     category_configs = {
         "Meat Group A": {

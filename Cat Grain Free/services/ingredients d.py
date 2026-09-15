@@ -1,5 +1,5 @@
 """
-Dog Diet Planner - Ingredients Service (FINAL VERSION with Fresh Weights)
+Cat Diet Planner - Ingredients Service (FINAL VERSION with Fresh Weights)
 
 This version matches exactly with:
 - fixed_ingredients_updated.csv
@@ -55,30 +55,20 @@ MAX_TOTAL_FIBER_PCT = 9.5     # Maximum 9.5% total dietary fiber in the diet
 # float = override dm_g to this value
 FIXED_OVERRIDES = {
     "fish oil":      None,   # Removed — cod liver oil covers the full oil allocation
-    "cod liver oil": 20.0,   # Doubled from CSV 10g to 20g
+    "bone meal":     None,   # Display only — excluded from all calculations
+    # cod liver oil reads directly from CSV (no override)
 }
 
-# Cod liver oil dm_g depends on whether salmon/tilapia is selected in Meat Group A
-COD_LIVER_OIL_DEFAULT_DM       = 16.0  # No salmon/tilapia in Meat A
-COD_LIVER_OIL_FISH_ONLY_DM     = 10.0  # Meat A is salmon/tilapia only
-COD_LIVER_OIL_FISH_WITH_OTHER_DM = 14.0  # Meat A includes salmon/tilapia + another meat
-COD_LIVER_OIL_FISH_NAMES = {"salmon", "talipia (fish)", "alaska pollock (fish)", "haddock (fish)"}
+# Fish-in-Meat-A rule: if ANY Meat A selection is fish (alone or with other meats),
+# cod liver oil drops to 0g. Meat A (balancer) absorbs the freed grams automatically.
+FISH_MEAT_A_NAMES = {"salmon", "talipia (fish)", "alaska pollock (fish)", "haddock (fish)"}
 
-
-def _cod_liver_oil_dm(meats_a):
-    """Determine cod liver oil dm_g based on Meat Group A selection."""
-    meat_a_names = {str(r.get("ingredient_name", "")).strip().lower() for r in meats_a}
-    fish_in_a = meat_a_names & COD_LIVER_OIL_FISH_NAMES
-    if not fish_in_a:
-        return COD_LIVER_OIL_DEFAULT_DM
-    if meat_a_names == fish_in_a:
-        return COD_LIVER_OIL_FISH_ONLY_DM
-    return COD_LIVER_OIL_FISH_WITH_OTHER_DM
+# Fish-in-Meat-C rule: if ANY Meat C selection is fish AND Meat A is NOT fish,
+# cod liver oil also drops to 0g.
+FISH_MEAT_C_NAMES = {"trout (fish)", "whitefish"}
 
 # Mineral Group constants
-MINERALS_A_BASE_DM  = 20.0   # Mineral Group A base allocation
-MINERALS_A_BONUS_DM = 2.0    # Bonus to Group A when Group B not selected
-MINERALS_B_TOTAL_DM = 8.0    # Mineral Group B total (bone meal / blood meal)
+MINERALS_A_DM = 27.0   # Mineral Group A total (always fixed — bone meal/dry blood meal are in fixed CSV)
 
 
 def _norm(df: pd.DataFrame) -> pd.DataFrame:
@@ -103,11 +93,6 @@ def load_csvs() -> dict:
         missing = list(REQUIRED_USER - set(u.columns))
         raise RuntimeError(f"{USER_CSV.name} missing columns: {missing}")
 
-    # Note: cod liver oil dm_g is now determined dynamically per-request based on
-    # Meat Group A selection (see _cod_liver_oil_dm). Fish oil remains zeroed here.
-    fish_oil_mask = f["ingredient_name"].str.strip().str.lower() == "fish oil"
-    f.loc[fish_oil_mask, "dm_g"] = 0.0
-
     _fixed_df, _user_df = f, u
     return {"ok": True, "fixed_rows": len(_fixed_df), "user_rows": len(_user_df)}
 
@@ -117,69 +102,73 @@ load_csvs()
 
 
 # ============================================================================
-# AAFCO Adult Maintenance Minimums (per kg DM basis)
+# AAFCO Cat Adult Maintenance — values taken directly from Cats-AFFCO.xlsx
+# Column order matches the spreadsheet exactly.
+# Units match the spreadsheet column headers.
 # ============================================================================
+
+# --- AAFCO minimums (Excel row: "AAFCO min") ---
+# Columns with no min value in the spreadsheet are omitted.
 AAFCO_MINIMUMS = {
-    # Macronutrients (% DM)
-    "protein": 18.0,  # Target range: 32-40%
-    "fat": 5.5,
-    
-    # Major Minerals (% DM)
-    "calcium": 0.6,
-    "phosphorus": 0.4,
-    "magnesium": 0.06,
-    "potassium": 0.6,
-    "sodium": 0.08,
-    
-    # Trace Minerals (mg/kg DM)
-    "iron": 40.0,
-    "zinc": 80.0,
-    "copper": 7.3,
-    "iodine": 1.0,
-    "selenium": 0.35,
-    
-    # Vitamins (mg/kg DM or IU/kg DM)
-    "thiamin": 2.25,
-    "riboflavin": 5.2,
-    "niacin": 13.6,
-    "pantothenic_acid": 12.0,
-    "folate": 0.216,
-    "vitamin_b12": 0.022,
-    "vitamin_a": 5000.0,
-    "vitamin_e": 34.0,
-    "vitamin_d": 500.0,
-    
-    # Fatty Acids (% DM)
-    "linoleic_acid": 1.3,
-    "alpha_linolenic_acid": 0.08,
-    "epa": 0.05,
-    "dha": 0.05,
-    
-    # Amino Acids (% DM)
-    "tryptophan": 0.16,
-    "tyrosine": 0.18,
-    "threonine": 0.48,
-    "isoleucine": 0.38,
-    "leucine": 0.68,
-    "lysine": 0.63,
-    "methionine": 0.33,
-    "phenylalanine": 0.45,
-    "valine": 0.49,
-    "arginine": 0.51,
+    # --- Macronutrients (% DM) ---
+    "Protein":           26.0,
+    "Fat":                9.0,
+
+    # --- Major Minerals (% DM) ---
+    "Ca":                 0.6,
+    "P":                  0.5,
+    "Mg":                 0.04,
+    "K":                  0.6,
+    "Na":                 0.2,
+
+    # --- Trace Minerals (mg/kg DM) ---
+    "Iron":              80.0,
+    "Zn":                75.0,
+    "Cu":                 5.0,
+    "Iodine":             1.3,
+    "Se":                 0.3,
+
+    # --- Vitamins ---
+    "Thiamin":            4.6,    # mg/kg DM
+    "Riboflavin":         4.0,    # mg/kg DM
+    "Niacin":            60.0,    # mg/kg DM
+    "Pantothenic_acid":   5.75,   # mg/kg DM
+    "Folate":             0.8,    # mg/kg DM
+    "Choline":         2400.0,    # mg/kg DM
+    "B12":                0.02,   # mg/kg DM
+    "Vitamin_A":       3332.0,    # IU/kg DM
+    "Vitamin_E":         28.0,    # IU/kg DM
+    "Vitamin_D":        280.0,    # IU/kg DM
+
+    # --- Fatty Acids (% DM) ---
+    "FA_18_2":            0.6,    # 18:2 (Linoleic, Omega-6)
+    "FA_18_3":            0.1,    # 18:3 (Alpha-linolenic, Omega-3)
+    "EPA":                0.01,   # 20:5
+    "DHA":                0.01,   # 22:6
+
+    # --- Amino Acids (% DM) ---
+    "Tryptophan":         0.16,
+    "Threonine":          0.73,
+    "Isoleucine":         0.52,
+    "Leucine":            1.24,
+    "Lysine":             0.83,
+    "Methionine":         0.2,
+    "Phenylalanine":      0.42,
+    "Tyrosine":           0.2,
+    "Valine":             0.2,
+    "Arginine":           1.04,
 }
 
+# --- AAFCO maximums (Excel row: "AAFCO max") ---
+# Only nutrients with a max value in the spreadsheet are listed.
 AAFCO_MAXIMUMS = {
-    "calcium": 2.5,
-    "phosphorus": 1.6,
-    "magnesium": 0.3,
-    "iron": 3000.0,
-    "zinc": 1000.0,
-    "copper": 250.0,
-    "iodine": 50.0,
-    "selenium": 2.0,
-    "vitamin_a": 250000.0,
-    "vitamin_e": 1000.0,
-    "vitamin_d": 3000.0,
+    "Iron":           700.0,    # mg/kg DM
+    "Zn":             300.0,    # mg/kg DM
+    "Cu":             100.0,    # mg/kg DM
+    "Iodine":          11.0,    # mg/kg DM
+    "Se":               2.0,    # mg/kg DM
+    "Vitamin_A":   333300.0,    # IU/kg DM
+    "Vitamin_D":     3080.0,    # IU/kg DM
 }
 
 
@@ -267,10 +256,10 @@ def _add_row(totals: Dict[str, float], dm: float, row: pd.Series):
     totals["Vitamin_B6"] += get_col("vitamin_b6_mg") * dm / 100.0
     
     # FOLATE: CSV has folate_ug (micrograms), convert to mg
-    totals["Folate"] += get_col("folate_ug") * dm / 100.0
+    totals["Folate"] += get_col("folate_ug") * dm / 100.0 
     
     # VITAMIN B12: CSV has vitamin_b12_ug (micrograms), convert to mg
-    totals["Vitamin_B12"] += get_col("vitamin_b12_ug") * dm / 100.0
+    totals["Vitamin_B12"] += get_col("vitamin_b12_ug") * dm / 100.0 
     
     # ========== FAT-SOLUBLE VITAMINS ==========
     totals["Vitamin_A"] += get_col("vitamin_a_iu") * dm / 100.0
@@ -374,107 +363,80 @@ def get_fiber_percent(row: pd.Series) -> float:
 # AAFCO Compliance Calculator
 # ============================================================================
 def calculate_aafco_percent_of_minimum(totals: Dict[str, float], total_dm_g: float = 1000.0) -> Dict[str, Any]:
-    """Calculate % of AAFCO minimum for all nutrients."""
-    
-    def calc_pct(actual, minimum):
+    """Calculate ratio of diet value to AAFCO minimum for every nutrient.
+    Keys match AAFCO_MINIMUMS exactly (Excel column names).
+    A ratio of 1.0 means the diet exactly meets the minimum.
+    """
+
+    def calc_pct(actual, key):
+        minimum = AAFCO_MINIMUMS.get(key)
         if minimum is None or minimum == 0:
             return None
         if actual is None or actual == 0:
             return 0.0
         return round(actual / minimum, 4)
-    
+
+    def pct_dm(nutrient_key):
+        return (totals.get(nutrient_key, 0) / total_dm_g) * 100
+
+    def mg_kg(nutrient_key):
+        return (totals.get(nutrient_key, 0) * 1000) / total_dm_g
+
     result = {}
-    
-    # MACRONUTRIENTS (% DM)
-    protein_pct = (totals.get("Protein", 0) / total_dm_g) * 100
-    fat_pct = (totals.get("Fat", 0) / total_dm_g) * 100
-    
-    result["protein"] = calc_pct(protein_pct, AAFCO_MINIMUMS["protein"])
-    result["fat"] = calc_pct(fat_pct, AAFCO_MINIMUMS["fat"])
-    
-    # MAJOR MINERALS (% DM)
-    ca_pct = (totals.get("Ca", 0) / total_dm_g) * 100
-    p_pct = (totals.get("P", 0) / total_dm_g) * 100
-    mg_pct = (totals.get("Mg", 0) / total_dm_g) * 100
-    k_pct = (totals.get("K", 0) / total_dm_g) * 100
-    na_pct = (totals.get("Na", 0) / total_dm_g) * 100
-    
-    result["calcium"] = calc_pct(ca_pct, AAFCO_MINIMUMS["calcium"])
-    result["phosphorus"] = calc_pct(p_pct, AAFCO_MINIMUMS["phosphorus"])
-    result["magnesium"] = calc_pct(mg_pct, AAFCO_MINIMUMS["magnesium"])
-    result["potassium"] = calc_pct(k_pct, AAFCO_MINIMUMS["potassium"])
-    result["sodium"] = calc_pct(na_pct, AAFCO_MINIMUMS["sodium"])
-    
-    # TRACE MINERALS (mg/kg DM)
-    iron_mg_kg = (totals.get("Iron", 0) * 1000) / total_dm_g
-    zn_mg_kg = (totals.get("Zn", 0) * 1000) / total_dm_g
-    cu_mg_kg = (totals.get("Cu", 0) * 1000) / total_dm_g
-    iodine_mg_kg = (totals.get("Iodine", 0) * 1000) / total_dm_g
-    se_mg_kg = (totals.get("Se", 0) * 1000) / total_dm_g
-    
-    result["iron"] = calc_pct(iron_mg_kg, AAFCO_MINIMUMS["iron"])
-    result["zinc"] = calc_pct(zn_mg_kg, AAFCO_MINIMUMS["zinc"])
-    result["copper"] = calc_pct(cu_mg_kg, AAFCO_MINIMUMS["copper"])
-    result["iodine"] = calc_pct(iodine_mg_kg, AAFCO_MINIMUMS["iodine"])
-    result["selenium"] = calc_pct(se_mg_kg, AAFCO_MINIMUMS["selenium"])
-    
-    # VITAMINS (mg/kg or IU/kg)
-    thiamin_mg_kg = (totals.get("Thiamin", 0) * 1000) / total_dm_g
-    riboflavin_mg_kg = (totals.get("Riboflavin", 0) * 1000) / total_dm_g
-    niacin_mg_kg = (totals.get("Niacin", 0) * 1000) / total_dm_g
-    panto_mg_kg = (totals.get("Pantothenic_acid", 0) * 1000) / total_dm_g
-    b6_mg_kg = (totals.get("Vitamin_B6", 0) * 1000) / total_dm_g
-    folate_mg_kg = (totals.get("Folate", 0) * 1000) / total_dm_g
-    b12_mg_kg = (totals.get("Vitamin_B12", 0) * 1000) / total_dm_g
-    
-    vit_a_iu_kg = (totals.get("Vitamin_A", 0) * 1000) / total_dm_g
-    vit_e_iu_kg = (totals.get("Vitamin_E", 0) * 1000) / total_dm_g
-    vit_d_iu_kg = (totals.get("Vitamin_D", 0) * 1000) / total_dm_g
-    
-    result["thiamin"] = calc_pct(thiamin_mg_kg, AAFCO_MINIMUMS["thiamin"])
-    result["riboflavin"] = calc_pct(riboflavin_mg_kg, AAFCO_MINIMUMS["riboflavin"])
-    result["niacin"] = calc_pct(niacin_mg_kg, AAFCO_MINIMUMS["niacin"])
-    result["pantothenic_acid"] = calc_pct(panto_mg_kg, AAFCO_MINIMUMS["pantothenic_acid"])
-    result["folate"] = calc_pct(folate_mg_kg, AAFCO_MINIMUMS["folate"])
-    result["vitamin_b12"] = calc_pct(b12_mg_kg, AAFCO_MINIMUMS["vitamin_b12"])
-    result["vitamin_a"] = calc_pct(vit_a_iu_kg, AAFCO_MINIMUMS["vitamin_a"])
-    result["vitamin_e"] = calc_pct(vit_e_iu_kg, AAFCO_MINIMUMS["vitamin_e"])
-    result["vitamin_d"] = calc_pct(vit_d_iu_kg, AAFCO_MINIMUMS["vitamin_d"])
-    
-    # FATTY ACIDS (% DM)
-    linoleic_pct = (totals.get("Linoleic_acid", 0) / total_dm_g) * 100
-    ala_pct = (totals.get("Alpha_linolenic_acid", 0) / total_dm_g) * 100
-    epa_pct = (totals.get("EPA", 0) / total_dm_g) * 100
-    dha_pct = (totals.get("DHA", 0) / total_dm_g) * 100
-    
-    result["linoleic_acid"] = calc_pct(linoleic_pct, AAFCO_MINIMUMS["linoleic_acid"])
-    result["alpha_linolenic_acid"] = calc_pct(ala_pct, AAFCO_MINIMUMS["alpha_linolenic_acid"])
-    result["epa"] = calc_pct(epa_pct, AAFCO_MINIMUMS["epa"])
-    result["dha"] = calc_pct(dha_pct, AAFCO_MINIMUMS["dha"])
-    
-    # AMINO ACIDS (% DM)
-    tryptophan_pct = (totals.get("Tryptophan", 0) / total_dm_g) * 100
-    tyrosine_pct = (totals.get("Tyrosine", 0) / total_dm_g) * 100
-    threonine_pct = (totals.get("Threonine", 0) / total_dm_g) * 100
-    isoleucine_pct = (totals.get("Isoleucine", 0) / total_dm_g) * 100
-    leucine_pct = (totals.get("Leucine", 0) / total_dm_g) * 100
-    lysine_pct = (totals.get("Lysine", 0) / total_dm_g) * 100
-    methionine_pct = (totals.get("Methionine", 0) / total_dm_g) * 100
-    phenylalanine_pct = (totals.get("Phenylalanine", 0) / total_dm_g) * 100
-    valine_pct = (totals.get("Valine", 0) / total_dm_g) * 100
-    arginine_pct = (totals.get("Arginine", 0) / total_dm_g) * 100
-    
-    result["tryptophan"] = calc_pct(tryptophan_pct, AAFCO_MINIMUMS["tryptophan"])
-    result["tyrosine"] = calc_pct(tyrosine_pct, AAFCO_MINIMUMS["tyrosine"])
-    result["threonine"] = calc_pct(threonine_pct, AAFCO_MINIMUMS["threonine"])
-    result["isoleucine"] = calc_pct(isoleucine_pct, AAFCO_MINIMUMS["isoleucine"])
-    result["leucine"] = calc_pct(leucine_pct, AAFCO_MINIMUMS["leucine"])
-    result["lysine"] = calc_pct(lysine_pct, AAFCO_MINIMUMS["lysine"])
-    result["methionine"] = calc_pct(methionine_pct, AAFCO_MINIMUMS["methionine"])
-    result["phenylalanine"] = calc_pct(phenylalanine_pct, AAFCO_MINIMUMS["phenylalanine"])
-    result["valine"] = calc_pct(valine_pct, AAFCO_MINIMUMS["valine"])
-    result["arginine"] = calc_pct(arginine_pct, AAFCO_MINIMUMS["arginine"])
-    
+
+    # --- Macronutrients (% DM) ---
+    result["Protein"]          = calc_pct(pct_dm("Protein"),               "Protein")
+    result["Fat"]              = calc_pct(pct_dm("Fat"),                    "Fat")
+
+    # --- Major Minerals (% DM) ---
+    result["Ca"]               = calc_pct(pct_dm("Ca"),                     "Ca")
+    result["P"]                = calc_pct(pct_dm("P"),                      "P")
+    # Alias keys expected by router
+    result["Protein_percent"]  = pct_dm("Protein")
+    result["Fat_percent"]      = pct_dm("Fat")
+    result["Ca_percent"]       = pct_dm("Ca")
+    result["P_percent"]        = pct_dm("P")
+    result["Mg"]               = calc_pct(pct_dm("Mg"),                     "Mg")
+    result["K"]                = calc_pct(pct_dm("K"),                      "K")
+    result["Na"]               = calc_pct(pct_dm("Na"),                     "Na")
+
+    # --- Trace Minerals (mg/kg DM) ---
+    result["Iron"]             = calc_pct(mg_kg("Iron"),                    "Iron")
+    result["Zn"]               = calc_pct(mg_kg("Zn"),                      "Zn")
+    result["Cu"]               = calc_pct(mg_kg("Cu"),                      "Cu")
+    result["Iodine"]           = calc_pct(mg_kg("Iodine"),                  "Iodine")
+    result["Se"]               = calc_pct(mg_kg("Se"),                      "Se")
+
+    # --- Vitamins ---
+    result["Thiamin"]          = calc_pct(mg_kg("Thiamin"),                 "Thiamin")
+    result["Riboflavin"]       = calc_pct(mg_kg("Riboflavin"),              "Riboflavin")
+    result["Niacin"]           = calc_pct(mg_kg("Niacin"),                  "Niacin")
+    result["Pantothenic_acid"] = calc_pct(mg_kg("Pantothenic_acid"),        "Pantothenic_acid")
+    result["Folate"]           = calc_pct(mg_kg("Folate"),                  "Folate")
+    result["Choline"]          = calc_pct(mg_kg("Choline"),                 "Choline")
+    result["B12"]              = calc_pct(mg_kg("Vitamin_B12"),             "B12")
+    result["Vitamin_A"]        = calc_pct(mg_kg("Vitamin_A"),               "Vitamin_A")
+    result["Vitamin_E"]        = calc_pct(mg_kg("Vitamin_E"),               "Vitamin_E")
+    result["Vitamin_D"]        = calc_pct(mg_kg("Vitamin_D"),               "Vitamin_D")
+
+    # --- Fatty Acids (% DM) ---
+    result["FA_18_2"]          = calc_pct(pct_dm("Linoleic_acid"),          "FA_18_2")
+    result["FA_18_3"]          = calc_pct(pct_dm("Alpha_linolenic_acid"),   "FA_18_3")
+    result["EPA"]              = calc_pct(pct_dm("EPA"),                    "EPA")
+    result["DHA"]              = calc_pct(pct_dm("DHA"),                    "DHA")
+
+    # --- Amino Acids (% DM) ---
+    result["Tryptophan"]       = calc_pct(pct_dm("Tryptophan"),             "Tryptophan")
+    result["Threonine"]        = calc_pct(pct_dm("Threonine"),              "Threonine")
+    result["Isoleucine"]       = calc_pct(pct_dm("Isoleucine"),             "Isoleucine")
+    result["Leucine"]          = calc_pct(pct_dm("Leucine"),                "Leucine")
+    result["Lysine"]           = calc_pct(pct_dm("Lysine"),                 "Lysine")
+    result["Methionine"]       = calc_pct(pct_dm("Methionine"),             "Methionine")
+    result["Phenylalanine"]    = calc_pct(pct_dm("Phenylalanine"),          "Phenylalanine")
+    result["Tyrosine"]         = calc_pct(pct_dm("Tyrosine"),               "Tyrosine")
+    result["Valine"]           = calc_pct(pct_dm("Valine"),                 "Valine")
+    result["Arginine"]         = calc_pct(pct_dm("Arginine"),               "Arginine")
+
     return result
 
 
@@ -514,21 +476,39 @@ def _add_extended_nutrient_output(result: dict, totals: dict, total_dm_g: float 
     result["folate_mg_kg"] = to_mg_kg(totals.get("Folate", 0))
     result["b12_mg_kg"] = to_mg_kg(totals.get("Vitamin_B12", 0))
     
+    # Missing keys needed by router
+    result["choline_mg_kg"] = to_mg_kg(totals.get("Choline", 0))
+
     # Fatty Acids (% of DM)
     result["linoleic_percent"] = to_pct_dm(totals.get("Linoleic_acid", 0))
     result["ala_percent"] = to_pct_dm(totals.get("Alpha_linolenic_acid", 0))
-    result["epa_percent"] = to_pct_dm(totals.get("EPA", 0))
-    result["dha_percent"] = to_pct_dm(totals.get("DHA", 0))
+    epa = totals.get("EPA", 0)
+    dha = totals.get("DHA", 0)
+    result["epa_percent"]   = to_pct_dm(epa)
+    result["dha_percent"]   = to_pct_dm(dha)
+    result["epa_dha_percent"] = to_pct_dm(epa + dha)
+
+    # Omega-6:Omega-3 ratio
+    omega6 = totals.get("Linoleic_acid", 0)
+    omega3 = totals.get("Alpha_linolenic_acid", 0) + epa + dha
+    result["Omega6_omega3_ratio"] = round(omega6 / omega3, 2) if omega3 > 0 else None
     
     # Amino Acids (% of DM)
     result["arginine_percent"] = to_pct_dm(totals.get("Arginine", 0))
+    result["histidine_percent"] = to_pct_dm(totals.get("Histidine", 0))
     result["isoleucine_percent"] = to_pct_dm(totals.get("Isoleucine", 0))
     result["leucine_percent"] = to_pct_dm(totals.get("Leucine", 0))
     result["lysine_percent"] = to_pct_dm(totals.get("Lysine", 0))
     result["methionine_percent"] = to_pct_dm(totals.get("Methionine", 0))
     result["cystine_percent"] = to_pct_dm(totals.get("Cystine", 0))
+    met = totals.get("Methionine", 0)
+    cys = totals.get("Cystine", 0)
+    result["met_cys_percent"] = to_pct_dm(met + cys)
     result["phenylalanine_percent"] = to_pct_dm(totals.get("Phenylalanine", 0))
     result["tyrosine_percent"] = to_pct_dm(totals.get("Tyrosine", 0))
+    phe = totals.get("Phenylalanine", 0)
+    tyr = totals.get("Tyrosine", 0)
+    result["phe_tyr_percent"] = to_pct_dm(phe + tyr)
     result["threonine_percent"] = to_pct_dm(totals.get("Threonine", 0))
     result["tryptophan_percent"] = to_pct_dm(totals.get("Tryptophan", 0))
     result["valine_percent"] = to_pct_dm(totals.get("Valine", 0))
@@ -581,12 +561,8 @@ def get_ingredients_grouped_by_category() -> Dict[str, Dict[str, Any]]:
         category = ingredient["display_group_name"]
         grouped[category].append(ingredient)
     
-    # NOTE: Meat Group A/B/C are intentionally left in CSV row order (a
-    # deliberate custom display order), everything else stays alphabetical.
-    CUSTOM_ORDER_CATEGORIES = {"Meat Group A", "Meat Group B", "Meat Group C"}
     for category in grouped:
-        if category not in CUSTOM_ORDER_CATEGORIES:
-            grouped[category].sort(key=lambda x: str(x.get("ingredient_name", "") or "").lower())
+        grouped[category].sort(key=lambda x: str(x.get("ingredient_name", "") or "").lower())
     
     categories_with_metadata = {}
     
@@ -598,7 +574,7 @@ def get_ingredients_grouped_by_category() -> Dict[str, Dict[str, Any]]:
             "mandatory": False,
             "min_selections": 0,
             "max_selections": None,
-            "notes": "224g alone | 164g with B | 134g with B+C"
+            "notes": "475g alone | 375g with B | 375g with B+C"
         },
         "Meat Group B": {
             "items": grouped.get("Meat Group B", []),
@@ -606,7 +582,7 @@ def get_ingredients_grouped_by_category() -> Dict[str, Dict[str, Any]]:
             "mandatory": False,
             "min_selections": 0,
             "max_selections": None,
-            "notes": "60g with A | 40g with A+C"
+            "notes": "100g with A | 60g with A+C"
         },
         "Meat Group C": {
             "items": grouped.get("Meat Group C", []),
@@ -614,7 +590,7 @@ def get_ingredients_grouped_by_category() -> Dict[str, Dict[str, Any]]:
             "mandatory": False,
             "min_selections": 0,
             "max_selections": None,
-            "notes": "Fixed at 50g total when selected"
+            "notes": "100g with A | 60g with A+B"
         },
         "Organ Meat (Other)": {
             "items": grouped.get("Organ Meat (Other)", []),
@@ -622,9 +598,9 @@ def get_ingredients_grouped_by_category() -> Dict[str, Dict[str, Any]]:
             "mandatory": False,
             "min_selections": 0,
             "max_selections": None,
-            "dm_range": {"min": 0, "max": 30},
-            "percentage": "30g fixed when selected (shared equally)",
-            "notes": "30g total split equally across selected items"
+            "dm_range": {"min": 0, "max": 35},
+            "percentage": "35g fixed when selected (shared equally)",
+            "notes": "35g total split equally across selected items"
         },
         "Organ Meat (Liver)": {
             "items": grouped.get("Organ Meat (Liver)", []),
@@ -632,19 +608,19 @@ def get_ingredients_grouped_by_category() -> Dict[str, Dict[str, Any]]:
             "mandatory": False,
             "min_selections": 0,
             "max_selections": None,
-            "dm_range": {"min": 125, "max": 155},
-            "percentage": "155g alone; 125g when organ meat also selected",
-            "notes": "155g alone; 125g when other organ meats selected — split equally"
+            "dm_range": {"min": 125, "max": 160},
+            "percentage": "160g alone; 125g when organ meat also selected",
+            "notes": "160g alone; 125g when other organ meats selected — split equally"
         },
         "Grain A": {
             "items": grouped.get("Grain A", []),
-            "label": "06 Grain A (Mandatory - Select at least one and a maximum of three, fixed at 30%)",
+            "label": "06 Grain A (Mandatory - Select at least one and a maximum of three, fixed at 110g base)",
             "mandatory": False,
             "min_selections": 0,
             "max_selections": None,
-            "dm_range": {"min": 359, "max": 359},
-            "percentage": "35.9% of diet (359g DM)",
-            "notes": "Fixed at 359g of diet DM — split equally across selected items"
+            "dm_range": {"min": 110, "max": 110},
+            "percentage": "110g fixed",
+            "notes": "Fixed at 110g — split equally across selected items"
         },
         "Vegetable A": {
             "items": grouped.get("Vegetable A", []),
@@ -652,9 +628,9 @@ def get_ingredients_grouped_by_category() -> Dict[str, Dict[str, Any]]:
             "mandatory": False,
             "min_selections": 0,
             "max_selections": None,
-            "dm_range": {"min": 90, "max": 90},
-            "percentage": "9% of diet (90g DM, fixed)",
-            "notes": "Fixed at 90g total — split equally across selected items"
+            "dm_range": {"min": 85, "max": 115},
+            "percentage": "90g (w/ VegB, no fruit) | 85g (w/ VegB + fruit) | 115g (no VegB, no fruit) | 110g (no VegB, w/ fruit)",
+            "notes": "90g (w/ VegB, no fruit) | 85g (w/ VegB + fruit) | 115g (no VegB, no fruit) | 110g (no VegB, w/ fruit)"
         },
         "Vegetable B": {
             "items": grouped.get("Vegetable B", []),
@@ -662,9 +638,9 @@ def get_ingredients_grouped_by_category() -> Dict[str, Dict[str, Any]]:
             "mandatory": False,
             "min_selections": 0,
             "max_selections": None,
-            "dm_range": {"min": 40, "max": 40},
-            "percentage": "4% of diet (40g DM, fixed)",
-            "notes": "Fixed at 40g total — split equally across selected items"
+            "dm_range": {"min": 25, "max": 25},
+            "percentage": "Fixed at 25g",
+            "notes": "Fixed at 25g — split equally across selected items"
         },
         "Fruit": {
             "items": grouped.get("Fruit", []),
@@ -672,8 +648,8 @@ def get_ingredients_grouped_by_category() -> Dict[str, Dict[str, Any]]:
             "mandatory": False,
             "min_selections": 0,
             "max_selections": None,
-            "dm_range": {"min": 0, "max": 25},
-            "notes": "25g total split equally across selected items"
+            "dm_range": {"min": 0, "max": 5},
+            "notes": "5g total split equally across selected items"
         },
         "Oil": {
             "items": grouped.get("Oil", []),
@@ -681,31 +657,20 @@ def get_ingredients_grouped_by_category() -> Dict[str, Dict[str, Any]]:
             "mandatory": False,
             "min_selections": 0,
             "max_selections": None,
-            "dm_range": {"min": 8, "max": 8},
-            "percentage": "8g fixed",
-            "notes": "Fixed at 8g total — split equally across selected items"
+            "dm_range": {"min": 10, "max": 10},
+            "percentage": "10g fixed",
+            "notes": "Fixed at 10g total — split equally across selected items"
         },
         # Fiber/Seeds category removed - fiber supplements no longer offered as a diet option
         "Mineral Group A": {
             "items": grouped.get("Mineral Group A", []),
             "label": "14 Mineral Group A",
-            "mandatory": True,
-            "min_selections": 1,
-            "max_selections": 2,
-            "dm_range": {"min": 11, "max": 22},
-            "percentage": "20g base (22g if Group B not selected) — split evenly if both selected",
-            "notes": "Mandatory: Select Eggshells, Calcium Carbonate, or both. Gets +2g bonus if Group B not selected."
+            "mandatory": True, "min_selections": 1, "max_selections": 2,
+            "dm_range": {"min": 13.5, "max": 27},
+            "percentage": "24g base (27g if Group B not selected) — split evenly if both selected",
+            "notes": "Mandatory: Select Eggshells, Calcium Carbonate, or both. Gets +3g bonus if Group B not selected."
         },
-        "Mineral Group B": {
-            "items": grouped.get("Mineral Group B", []),
-            "label": "15 Mineral Group B",
-            "mandatory": False,
-            "min_selections": 0,
-            "max_selections": 2,
-            "dm_range": {"min": 4, "max": 8},
-            "percentage": "8g total — one selected: 8g | both selected: 4g each",
-            "notes": "Optional: Select Bone Meal, Blood Meal, or both. If not selected, 2g goes to Group A and 6g to Grain A."
-        }
+
 
     }
     
@@ -808,16 +773,15 @@ def calculate_diet(selected_names: List[str]) -> Dict[str, Any]:
     Calculate diet from selected ingredients.
     
     NEW ALLOCATION RULES:
-    - Meat total: 224g — split by group:
-        Only A: 224g | A+B: 164+60g | A+B+C: 134+40+50g
-    - Grain A: FIXED at 359g. When fruits are selected, grain reduces to 334g and fruit takes 25g.
-      Meat allocation is NEVER affected by fruit selection — fruits always carve from Grain A, not meat.
-    - Fruit (optional): Fixed 25g total, carved out of Grain A budget — meat is NEVER reduced
-    - Liver: 155g alone; 125g when organ meat also selected
-    - Organ meat (non-liver): 30g total when selected
-    - Vegetable A: Fixed 90g (split equally across selected A items)
-    - Vegetable B: Fixed 40g (split equally across selected B items)
-    - Oil: Fixed 8g (split equally across selected oils)
+    - Meat total: 475g — split by group:
+        Only A: 475g | A+B: 375+100g | A+B+C: 375+60+40g
+    - Grain A: FIXED at 110g (independent of fruit selection)
+    - Fruit (optional): Fixed 5g total
+    - Liver: 160g alone; 125g when organ meat also selected
+    - Organ meat (non-liver): 35g total when selected
+    - Vegetable A: 90g (w/ VegB, no fruit) | 85g (w/ VegB + fruit) | 115g (no VegB, no fruit) | 110g (no VegB, w/ fruit)
+    - Vegetable B: Fixed at 25g
+    - Oil: Fixed 10g (split equally across selected oils)
     - Fiber supplement / seeds category: REMOVED
     - Protein target range of 32-40% (advisory)
     - FIBER SUPPLEMENT LIMIT: Maximum 10g
@@ -850,6 +814,19 @@ def calculate_diet(selected_names: List[str]) -> Dict[str, Any]:
     meats_a = [r for r in picks if gname(r) == "meat group a"]
     meats_b = [r for r in picks if gname(r) == "meat group b"]
     meats_c = [r for r in picks if gname(r) == "meat group c"]
+    minerals   = [r for r in picks if gname(r) == "mineral group a"]
+
+    # Fish-in-Meat-A rule: if ANY Meat A selection is fish, cod liver drops to 0g
+    # Fish-in-Meat-C rule: if ANY Meat C selection is fish AND Meat A is NOT fish, cod liver also drops to 0g
+    meat_a_names = {str(r.get("ingredient_name", "")).strip().lower() for r in meats_a}
+    meat_c_names = {str(r.get("ingredient_name", "")).strip().lower() for r in meats_c}
+    has_fish_in_meat_a = bool(meat_a_names & FISH_MEAT_A_NAMES)
+    has_fish_in_meat_c = bool(meat_c_names & FISH_MEAT_C_NAMES)
+    effective_overrides = FIXED_OVERRIDES.copy()
+    if has_fish_in_meat_a:
+        effective_overrides["cod liver oil"] = 0.0  # Meat A fish wins — 0g
+    elif has_fish_in_meat_c:
+        effective_overrides["cod liver oil"] = 0.0  # Meat C fish only — 0g
     grains_a = [r for r in picks if gname(r) == "grain a"]
     veg_a = [r for r in picks if gname(r) == "vegetable a"]
     veg_b = [r for r in picks if gname(r) == "vegetable b"]
@@ -858,14 +835,17 @@ def calculate_diet(selected_names: List[str]) -> Dict[str, Any]:
     livers = [r for r in picks if gname(r) == "organ meat (liver)"]
     organs = [r for r in picks if gname(r) == "organ meat"]
     fiber_supps = []  # Fiber/Seeds category removed - no longer offered as a diet option
-    minerals   = [r for r in picks if gname(r) == "mineral group a"]
-    minerals_b = [r for r in picks if gname(r) == "mineral group b"]
     # (If any fiber group items are passed, they are silently ignored)
     
     # ---------- Validation (warnings only - no selection constraints enforced) ----------
     issues: List[str] = []
     if not minerals:
         issues.append("ERROR: Mineral Group A is MANDATORY - select Eggshells, Calcium Carbonate, or both.")
+
+    # --- MINERAL ALLOCATION ---
+    # Group A: always 27g (bone meal/dry blood meal are in fixed CSV)
+    has_minerals = len(minerals) > 0
+    mineral_a_dm = MINERALS_A_DM if has_minerals else 0.0
 
     RECOMMENDED_MAX = {
         "Meat Group A": 3, "Meat Group B": 2, "Meat Group C": 2,
@@ -925,7 +905,7 @@ def calculate_diet(selected_names: List[str]) -> Dict[str, Any]:
     
     # ============================================================================
     # PRE-CALCULATE ALL FIXED ALLOCATIONS (NEW RULES)
-    # Grain A: FIXED at 359g
+    # Grain A: FIXED at 110g
     # Veg A: starts at 100g min, can go up to 150g max (top-up)
     # Veg B: starts at 50g min, can go up to 100g max (fiber-checked)
     # ============================================================================
@@ -940,10 +920,8 @@ def calculate_diet(selected_names: List[str]) -> Dict[str, Any]:
 
     def _fixed_dm_with_overrides(r):
         name = str(r.get("ingredient_name", "")).strip().lower()
-        if name == "cod liver oil":
-            return _cod_liver_oil_dm(meats_a)
-        override = FIXED_OVERRIDES.get(name)
-        if override is None and name in FIXED_OVERRIDES:
+        override = effective_overrides.get(name)
+        if override is None and name in effective_overrides:
             return 0.0
         if isinstance(override, float):
             return override
@@ -953,88 +931,78 @@ def calculate_diet(selected_names: List[str]) -> Dict[str, Any]:
     # ============================================================================
     # FIXED ALLOCATION RULES (all values in grams DM)
     # -----------------------------------------------------------------------
-    # Meat total:  229g  — A is always the balancer
-    #   - Only Meat A selected           : A = 229g
-    #   - Meat A + B selected            : A = 169g, B = 60g
-    #   - Meat A + C selected            : A = 179g, C = 50g
-    #   - Meat A + B + C selected        : A = 139g, B = 40g, C = 50g
-    # Grain A: DYNAMIC BALANCER — takes remaining budget after all other groups.
-    #          Guarantees total DM = exactly 1000g. Fruits (20g) are separate.
-    # Liver:   155g when liver only; 125g when liver + organ meat also selected
-    # Organ meat (non-liver): 30g when selected alongside liver
-    # Vegetables: Veg A alone = 130g | Veg A + B = 90g + 40g = 130g total
-    # Fruits:  20g fixed (split equally across selected fruits), from grain budget
-    # Oil:     8g fixed (split equally across selected oils)
-    # Minerals A: 22g alone, 20g when Group B also selected
-    # Minerals B: 8g when selected
-    # Fixed CSV supplements: variable → Grand total DM always = 1000g
+    # Meat total:  475g
+    #   - Only Meat A selected           : 475g split equally across A items
+    #   - Meat A + B selected            : A = 375g, B = 100g
+    #   - Meat A + B + C selected        : A = 355g, B = 60g, C = 60g
+    # Grain A: 110g fixed (split equally). Fruit is independent — does not reduce Grain A.
+    # Liver:   160g when liver only; 125g when liver + organ meat also selected
+    # Organ meat (non-liver): 35g when selected alongside liver
+    # Vegetable A: 90g (w/ VegB, no fruit) | 85g (w/ VegB + fruit) | 115g (no VegB, no fruit) | 110g (no VegB, w/ fruit)
+    # Vegetable B: Fixed at 25g
+    # Fruits:  5g fixed (split equally across selected fruits)
+    # Oil:     10g fixed (split equally across selected oils)
     # ============================================================================
-    MEAT_TOTAL_DM      = 229.0
-    MEAT_A_ONLY_DM     = 229.0   # all meat goes to group A
-    MEAT_A_WITH_B_DM   = 169.0   # group A share when B also selected (A is balancer)
-    MEAT_B_DM          = 60.0    # group B fixed share
-    MEAT_A_WITH_BC_DM  = 139.0   # group A share when B and C also selected (A is balancer)
-    MEAT_B_WITH_C_DM   = 40.0    # group B share when C also selected
-    MEAT_C_DM          = 50.0    # group C fixed share (anchor)
-    MEAT_A_WITH_C_DM   = 179.0   # group A share when only C selected (229 - 50)
-    
-    # --- MINERAL ALLOCATION ---
-    # Group A: 20g base. If Group B not selected, Group A gets +2g bonus (22g total).
-    # Group B: 8g total if selected, else 0g.
-    # Minerals allocate independently from remaining — NOT carved from Grain A.
-    has_minerals   = len(minerals) > 0
-    has_minerals_b = len(minerals_b) > 0
-    if has_minerals_b:
-        mineral_a_dm = MINERALS_A_BASE_DM                          # 20g
-        mineral_b_dm = MINERALS_B_TOTAL_DM                         # 8g
-    else:
-        mineral_a_dm = MINERALS_A_BASE_DM + MINERALS_A_BONUS_DM    # 22g
-        mineral_b_dm = 0.0
-    if not has_minerals:
-        mineral_a_dm = 0.0
+    MEAT_TOTAL_DM      = 475.0
+    MEAT_A_ONLY_DM     = 475.0   # all meat goes to group A
+    MEAT_A_WITH_B_DM   = 375.0   # group A share when B also selected
+    MEAT_B_DM          = 100.0   # group B fixed share
+    MEAT_A_WITH_BC_DM  = 355.0   # group A share when B and C also selected
+    MEAT_B_WITH_C_DM   = 60.0    # group B share when C also selected
+    MEAT_C_WITH_B_DM   = 60.0    # group C share when B also selected
+    MEAT_C_DM          = 100.0   # group C share when only A+C (no B)
 
-    FRUITS_DM          = 20.0 if fruits else 0.0
-    # GRAIN_A_DM is computed dynamically inside calc_diet_allocation as the balancer.
-    
-    # Liver: 155g alone, 125g when organ meats also present
-    LIVER_DM           = (125.0 if organs else 155.0) if livers else 0.0
-    # Organ meat (non-liver): 30g total split across up to 2 organs
-    ORGAN_DM_TOTAL     = 30.0 if organs else 0.0
-    
-    VEG_A_DM           = (130.0 if not veg_b else 90.0) if veg_a else 0.0   # 130g alone, 90g when B also selected
-    VEG_B_DM           = 40.0   if veg_b   else 0.0
-    OILS_DM            = 8.0    if oils    else 0.0
+    GRAIN_A_BASE_DM    = 110.0
+    FRUITS_DM          = 5.0 if fruits else 0.0
+    GRAIN_A_DM         = GRAIN_A_BASE_DM if grains_a else 0.0
 
+    # Liver: 160g alone, 125g when organ meats also present
+    LIVER_DM           = (125.0 if organs else 160.0) if livers else 0.0
+    # Organ meat (non-liver): 35g total split across organs
+    ORGAN_DM_TOTAL     = 35.0 if organs else 0.0
+
+    # Veg A depends on whether Veg B and/or fruits are selected
+    if veg_b and fruits:
+        VEG_A_DM = 85.0  if veg_a else 0.0
+    elif veg_b and not fruits:
+        VEG_A_DM = 90.0  if veg_a else 0.0
+    elif not veg_b and fruits:
+        VEG_A_DM = 110.0 if veg_a else 0.0
+    else:  # no Veg B, no fruits
+        VEG_A_DM = 115.0 if veg_a else 0.0
+
+    # Veg B fixed at 25g regardless of fruit
+    VEG_B_DM           = 25.0 if veg_b else 0.0
+    OILS_DM            = 10.0   if oils    else 0.0
     
     # Compute meat group allocations based on which groups are present.
     # B and C are fully independent — either can be selected without the other.
     has_b = bool(meats_b)
     has_c = bool(meats_c)
     if has_b and has_c:
-        MEAT_A_ALLOC = MEAT_A_WITH_BC_DM   # 134g
-        MEAT_B_ALLOC = MEAT_B_WITH_C_DM    # 40g
-        MEAT_C_ALLOC = MEAT_C_DM           # 50g
+        MEAT_A_ALLOC = MEAT_A_WITH_BC_DM   # 375g
+        MEAT_B_ALLOC = MEAT_B_WITH_C_DM    # 60g
+        MEAT_C_ALLOC = MEAT_C_WITH_B_DM    # 60g
     elif has_b and not has_c:
-        MEAT_A_ALLOC = MEAT_A_WITH_B_DM    # 164g
-        MEAT_B_ALLOC = MEAT_B_DM           # 60g
+        MEAT_A_ALLOC = MEAT_A_WITH_B_DM    # 375g
+        MEAT_B_ALLOC = MEAT_B_DM           # 100g
         MEAT_C_ALLOC = 0.0
     elif has_c and not has_b:
-        MEAT_A_ALLOC = MEAT_A_WITH_C_DM    # 179g  (A is balancer: 229 - 50)
+        MEAT_A_ALLOC = MEAT_A_WITH_B_DM    # 375g  (C takes same slice as B would)
         MEAT_B_ALLOC = 0.0
-        MEAT_C_ALLOC = MEAT_C_DM           # 50g  (C is anchor)
+        MEAT_C_ALLOC = MEAT_C_DM           # 100g
     else:
-        MEAT_A_ALLOC = MEAT_A_ONLY_DM      # 224g
+        MEAT_A_ALLOC = MEAT_A_ONLY_DM      # 475g
         MEAT_B_ALLOC = 0.0
         MEAT_C_ALLOC = 0.0
 
     # ============================================================================
-    # ALLOCATION FUNCTION — Grain A is the dynamic balancer
+    # ALLOCATION FUNCTION — Meat A is the dynamic balancer (1000g - everything else)
     # ============================================================================
     def calc_diet_allocation(veg_a_dm: float, veg_b_dm: float, fiber_seeds_scale: float = 1.0) -> tuple:
         """
         Calculate diet with specified Veg A / Veg B DM allocations.
-        Grain A is the dynamic balancer — it takes whatever remaining budget is left
-        after fixed CSV ingredients and all other user allocations, guaranteeing 1000g DM.
+        Meat A is the dynamic balancer: meat_a_dm = 1000g - non_meat_a_total.
         """
         dm_breakdown_raw: List[Dict[str, Any]] = []
         ingredient_totals: List[Dict[str, Any]] = []
@@ -1045,10 +1013,8 @@ def calculate_diet(selected_names: List[str]) -> Dict[str, Any]:
         fixed_dm_used = 0.0
         for _, r in fdf.iterrows():
             name_key = str(r.get("ingredient_name", "")).strip().lower()
-            if name_key == "cod liver oil":
-                dm = _cod_liver_oil_dm(meats_a)
-            elif name_key in FIXED_OVERRIDES:
-                override = FIXED_OVERRIDES[name_key]
+            if name_key in effective_overrides:
+                override = effective_overrides[name_key]
                 if override is None:
                     continue  # skip entirely
                 dm = float(override)
@@ -1056,7 +1022,7 @@ def calculate_diet(selected_names: List[str]) -> Dict[str, Any]:
                 raw_dm = r.get("dm_g", 0)
                 try:
                     dm = float(raw_dm)
-                    if __import__("pandas").isna(dm):
+                    if pd.isna(dm):
                         dm = 0.0
                 except (ValueError, TypeError):
                     dm = 0.0
@@ -1081,43 +1047,37 @@ def calculate_diet(selected_names: List[str]) -> Dict[str, Any]:
                 }
                 fixed_dm_used += dm
             else:
-                # dm_g is 0 or missing/blank in the CSV (e.g. ingredient not yet
-                # filled in with nutrient data). Still show it in the fixed
-                # ingredients list at 0g rather than dropping it silently.
-                dm_breakdown_raw.append({
-                    "ingredient": r["ingredient_name"],
-                    "dm_g": 0.0,
-                    "fresh_weight_g": 0.0,
-                    "water_percent": get_water_percent(r),
-                    "fixed": True
-                })
-                ingredient_allocations[r["ingredient_name"]] = {
-                    "dm_g": 0.0,
-                    "fresh_weight_g": 0.0,
-                    "water_percent": get_water_percent(r),
-                    "fixed": True
-                }
+                # Zero-DM fixed ingredients still appear in breakdown for display purposes
+                name = str(r.get("ingredient_name", "")).strip()
+                if name:
+                    water_pct = get_water_percent(r)
+                    dm_breakdown_raw.append({
+                        "ingredient": name,
+                        "dm_g": 0.0,
+                        "fresh_weight_g": 0.0,
+                        "water_percent": water_pct,
+                        "fixed": True
+                    })
         
         remaining = max(0.0, FIXED_TOTAL_DM - fixed_dm_used)
 
-        # --- GRAIN A: dynamic balancer ---
-        # All other user allocations are fixed; grain takes whatever is left
-        # so that fixed_dm + all user allocations = exactly 1000g.
-        other_user_dm = (
-            MEAT_A_ALLOC + MEAT_B_ALLOC + MEAT_C_ALLOC
-            + LIVER_DM + ORGAN_DM_TOTAL
-            + veg_a_dm + veg_b_dm
-            + FRUITS_DM
-            + OILS_DM
-            + mineral_a_dm + mineral_b_dm
+        # --- DYNAMIC MEAT A CALCULATION ---
+        # Meat A is the balancer: gets whatever is left after all other categories
+        non_meat_a_total = (
+            fixed_dm_used +
+            MEAT_B_ALLOC + MEAT_C_ALLOC +
+            GRAIN_A_DM +
+            LIVER_DM + ORGAN_DM_TOTAL +
+            veg_a_dm + veg_b_dm +
+            FRUITS_DM + OILS_DM +
+            mineral_a_dm
         )
-        GRAIN_A_DM = max(0.0, min(359.0, (remaining - other_user_dm) if grains_a else 0.0))
-        
+        meat_a_dm = max(0.0, FIXED_TOTAL_DM - non_meat_a_total)
+
         def _add_item(row: pd.Series, dm: float):
             nonlocal remaining
-            if dm <= 0 or remaining <= 0:
+            if dm <= 0:
                 return 0.0
-            dm = min(dm, remaining)
             name = row["ingredient_name"]
             _add_row(totals, dm, row)
             
@@ -1147,9 +1107,9 @@ def calculate_diet(selected_names: List[str]) -> Dict[str, Any]:
             remaining -= dm
             return dm
         
-        # MEATS FIRST: ensures full allocation before remaining budget is consumed
-        if meats_a and MEAT_A_ALLOC > 0:
-            per = MEAT_A_ALLOC / len(meats_a)
+        # MEATS FIRST: Meat A uses dynamic allocation (balancer)
+        if meats_a and meat_a_dm > 0:
+            per = meat_a_dm / len(meats_a)
             for r in meats_a:
                 _add_item(r, per)
         if meats_b and MEAT_B_ALLOC > 0:
@@ -1161,7 +1121,7 @@ def calculate_diet(selected_names: List[str]) -> Dict[str, Any]:
             for r in meats_c:
                 _add_item(r, per)
         
-        # Liver: 155g alone, 125g when organ meats also present — split equally
+        # Liver: 160g alone, 125g when organ meats also present — split equally
         if livers:
             per = LIVER_DM / len(livers)
             for r in livers:
@@ -1179,14 +1139,15 @@ def calculate_diet(selected_names: List[str]) -> Dict[str, Any]:
             for r in oils:
                 _add_item(r, per)
         
-        # GRAIN A: dynamic balancer — takes whatever remaining budget is left after all other groups.
-        # This guarantees total DM = exactly 1000g. Fruits are allocated separately after grain.
+        # GRAIN A: 110g fixed. Fruit is independent at 5g — does not reduce Grain A.
+        # IMPORTANT: Meat allocation is NEVER reduced by fruit selection.
+        # Grain A ingredients: Quinoa, Tapioca, Potatoes, Sweet Potatoes.
         if grains_a:
             per = GRAIN_A_DM / len(grains_a)
             for r in grains_a:
                 _add_item(r, per)
         
-        # FRUITS: Fixed 25g total (split equally), replaces 25g of Grain A.
+        # FRUITS: Fixed 5g total (split equally).
         if fruits and FRUITS_DM > 0:
             per = FRUITS_DM / len(fruits)
             for r in fruits:
@@ -1206,18 +1167,12 @@ def calculate_diet(selected_names: List[str]) -> Dict[str, Any]:
         
         # FIBER/SEEDS: removed — fiber_supps is always empty
 
-        # MINERAL GROUP A (mandatory - 20g base, 22g if Group B not selected)
+        # MINERAL GROUP A (mandatory - 24g base, 27g if Group B not selected)
         if minerals:
             per = mineral_a_dm / len(minerals)
             for r in minerals:
                 _add_item(r, per)
 
-        # MINERAL GROUP B (optional - 8g total, split evenly if both selected)
-        if minerals_b:
-            per = mineral_b_dm / len(minerals_b)
-            for r in minerals_b:
-                _add_item(r, per)
-        
         # Calculate percentages (always based on 1000g)
         protein_pct = totals["Protein"] * 100.0 / FIXED_TOTAL_DM
         fiber_pct = totals["Fiber"] * 100.0 / FIXED_TOTAL_DM
@@ -1234,8 +1189,8 @@ def calculate_diet(selected_names: List[str]) -> Dict[str, Any]:
     fiber_seeds_scale = 1.0   # kept for signature compatibility; fiber_supps is always empty
     adjustment_info = []
     
-    best_veg_a_dm = VEG_A_DM   # fixed 90g (or 0 if no veg_a selected)
-    best_veg_b_dm = VEG_B_DM   # fixed 40g (or 0 if no veg_b selected)
+    best_veg_a_dm = VEG_A_DM   # dynamic: 90g (w/ VegB, no fruit) | 85g (w/ VegB + fruit) | 115g (no VegB, no fruit) | 110g (no VegB, w/ fruit)
+    best_veg_b_dm = VEG_B_DM   # fixed 25g
     
     _, _, _, _, _, initial_fiber_pct, _ = calc_diet_allocation(
         best_veg_a_dm, best_veg_b_dm, fiber_seeds_scale
