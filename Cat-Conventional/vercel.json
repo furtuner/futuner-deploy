@@ -2,7 +2,11 @@
   "version": 2,
   "builds": [
     { "src": "main.py", "use": "@vercel/python" },
-    { "src": "api/render-pdf.js", "use": "@vercel/node" }
+    {
+      "src": "api/render-pdf.js",
+      "use": "@vercel/node",
+      "config": { "memory": 1024, "maxDuration": 30 }
+    }
   ],
   "routes": [
     { "src": "/api/render-pdf", "dest": "/api/render-pdf.js" },

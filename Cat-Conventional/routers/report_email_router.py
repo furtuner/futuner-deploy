@@ -8,15 +8,7 @@ turns it into a PDF, and emails that PDF as an attachment.
 ─── How the PDF gets made (no third-party account) ──────────────────────
 This calls /api/render-pdf — a Node.js serverless function living in the
 SAME Vercel project (see api/render-pdf.js) that uses real headless
-Chromium via @sparticuz/chromium + puppeteer-core. That's just an npm
-package, not a service: no signup, no API key. Because it's a real
-browser rendering the page with print-media CSS emulated, the PDF matches
-what the user's own browser produces via "Print / Save" — not an
-approximation.
-
-This Python function is just the orchestrator: get the HTML, call the
-Node function on your own domain to turn it into PDF bytes, email those
-bytes as an attachment.
+Chromium via @sparticuz/chromium-min + puppeteer-core.
 
 ─── Wire this into each of your 6 FastAPI apps ──────────────────────────
     from report_email_router import router as report_email_router
@@ -26,12 +18,6 @@ bytes as an attachment.
     fastapi
     pydantic
     requests
-
-─── Also needed in each of the 6 Vercel projects ────────────────────────
-    - api/render-pdf.js (the Node function — see that file's own header
-      for its package.json / vercel.json requirements)
-    - This relies on VERCEL_URL, which Vercel sets automatically for every
-      deployment — nothing to configure for that part.
 
 ─── Environment variables ────────────────────────────────────────────────
     SMTP_HOST       e.g. smtp.gmail.com
@@ -55,12 +41,6 @@ from pydantic import BaseModel, EmailStr
 
 router = APIRouter()
 
-# ─── Config ──────────────────────────────────────────────────────────────
-# VERCEL_URL is set automatically by Vercel for every deployment (e.g.
-# "my-project-abc123.vercel.app") — this is how the Python function calls
-# the Node function living right next to it, with no separate domain/
-# account to configure. Locally (no VERCEL_URL) it falls back to localhost
-# so you can run both functions with `vercel dev`.
 _VERCEL_URL = os.environ.get("VERCEL_URL")
 RENDER_PDF_URL = f"https://{_VERCEL_URL}/api/render-pdf" if _VERCEL_URL else "http://localhost:3000/api/render-pdf"
 
@@ -71,17 +51,15 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 FROM_EMAIL = os.environ.get("FROM_EMAIL", SMTP_USER)
 FROM_NAME = os.environ.get("FROM_NAME", "FurTuner")
 
-MAX_HTML_BYTES = 5_000_000  # ~5MB sanity cap on the incoming report HTML
+MAX_HTML_BYTES = 5_000_000
 
 
-# ─── Request schema ──────────────────────────────────────────────────────
 class ReportEmailRequest(BaseModel):
     recipient_email: EmailStr
     patient_name: str
     report_html: str
 
 
-# ─── PDF rendering (via the same-project Node function) ─────────────────
 def render_pdf(html: str) -> bytes:
     resp = requests.post(RENDER_PDF_URL, json={"html": html}, timeout=30)
     if resp.status_code != 200:
@@ -89,7 +67,6 @@ def render_pdf(html: str) -> bytes:
     return resp.content
 
 
-# ─── Sending ─────────────────────────────────────────────────────────────
 def send_email_with_pdf(to_address: str, subject: str, body_text: str, pdf_bytes: bytes, filename: str) -> None:
     if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD:
         raise RuntimeError(
@@ -114,7 +91,6 @@ def send_email_with_pdf(to_address: str, subject: str, body_text: str, pdf_bytes
         server.sendmail(FROM_EMAIL, [to_address], msg.as_string())
 
 
-# ─── Route ───────────────────────────────────────────────────────────────
 @router.post("/report/email")
 def email_report(req: ReportEmailRequest):
     if len(req.report_html.encode("utf-8")) > MAX_HTML_BYTES:
