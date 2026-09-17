@@ -3,19 +3,24 @@ report_email_router.py
 
 Handles POST /report/email — receives the *exact* HTML the frontend's
 "Print / Save" button renders (captured from the .print-only DOM node),
-uploads it to Vercel Blob storage as a public .html file, and emails the
-recipient a LINK to it instead of an attachment.
+uploads it to Vercel Blob storage, and emails the recipient a LINK to
+view it — served through this backend's own /report/view route rather
+than Blob's own public URL directly.
 
 WHY A LINK INSTEAD OF AN ATTACHMENT OR EMBEDDED HTML: email clients
 render HTML through a restrictive sanitizer (this is what broke the pie
-chart when the report was sent as the email body). An attachment avoids
-that, but some email clients flag .html attachments as risky, and older/
-less technical recipients can find "open this attachment in a browser"
-confusing. A plain link is the simplest possible experience: the
-recipient clicks it, and their own browser renders the actual file with
-zero restrictions — no attachment, no download step, no "open with"
-menu. It's also exactly what most portals (Stripe, medical results
-portals, etc.) do for this kind of "your report is ready" email.
+chart when the report was sent as the email body). A plain link is the
+simplest possible experience: the recipient clicks it, and their own
+browser renders the actual file with zero restrictions.
+
+WHY /report/view PROXIES THE BLOB INSTEAD OF LINKING TO IT DIRECTLY:
+Vercel Blob intentionally forces "Content-Disposition: attachment" for
+HTML files specifically (to stop people hosting websites on Blob
+storage) — there's no option to override this. Linking straight to the
+Blob URL would force a download instead of rendering in the browser.
+Fetching the file server-side here and returning it as a normal
+HTMLResponse sidesteps that entirely: FastAPI's response has no forced
+attachment header, so it renders inline exactly like any other webpage.
 
 ─── Setup ─────────────────────────────────────────────────────────────
     1. In this Vercel project: Storage tab → Create Database → Blob →
@@ -30,10 +35,12 @@ portals, etc.) do for this kind of "your report is ready" email.
 ─── requirements.txt ─────────────────────────────────────────────────────
     fastapi
     pydantic
+    requests
     vercel_blob
 
 ─── Environment variables ────────────────────────────────────────────────
     BLOB_READ_WRITE_TOKEN   auto-added when you create a Blob store (see Setup)
+    VERCEL_URL              set automatically by Vercel for every deployment
     SMTP_HOST               e.g. smtp.gmail.com
     SMTP_PORT               e.g. 587
     SMTP_USER               the SMTP username
@@ -49,14 +56,20 @@ import ssl
 import uuid
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from urllib.parse import quote, urlparse
 
+import requests
 import vercel_blob
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, EmailStr
 
 router = APIRouter()
 
 # ─── Config ──────────────────────────────────────────────────────────────
+_VERCEL_URL = os.environ.get("VERCEL_URL")
+BASE_URL = f"https://{_VERCEL_URL}" if _VERCEL_URL else "http://localhost:8000"
+
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
@@ -65,6 +78,11 @@ FROM_EMAIL = os.environ.get("FROM_EMAIL", SMTP_USER)
 FROM_NAME = os.environ.get("FROM_NAME", "FurTuner")
 
 MAX_HTML_BYTES = 5_000_000  # ~5MB sanity cap on the incoming report HTML
+
+# Only ever proxy URLs on Vercel Blob's own domain — this route fetches
+# and returns whatever URL it's given, so without this check it would be
+# an open proxy anyone could use to fetch arbitrary URLs through your server.
+ALLOWED_BLOB_HOST_SUFFIX = ".public.blob.vercel-storage.com"
 
 
 # ─── Request schema ──────────────────────────────────────────────────────
@@ -106,8 +124,6 @@ def send_report_link_email(to_address: str, subject: str, plain_body: str, html_
     msg["Subject"] = subject
     msg["From"] = f"{FROM_NAME} <{FROM_EMAIL}>"
     msg["To"] = to_address
-    # Plain-text fallback first, HTML last — email clients prefer the last
-    # part they understand, so the richer HTML version wins when supported.
     msg.attach(MIMEText(plain_body, "plain"))
     msg.attach(MIMEText(html_body, "html"))
 
@@ -118,34 +134,33 @@ def send_report_link_email(to_address: str, subject: str, plain_body: str, html_
         server.sendmail(FROM_EMAIL, [to_address], msg.as_string())
 
 
-# ─── Route ───────────────────────────────────────────────────────────────
+# ─── Route: send the email ────────────────────────────────────────────────
 @router.post("/report/email")
 def email_report(req: ReportEmailRequest):
     if len(req.report_html.encode("utf-8")) > MAX_HTML_BYTES:
         raise HTTPException(status_code=413, detail="Report HTML too large.")
 
     try:
-        report_url = upload_report(req.report_html, req.patient_name)
+        blob_url = upload_report(req.report_html, req.patient_name)
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
+    # Link to OUR OWN /report/view route (which proxies the Blob content),
+    # not the Blob URL directly — see the module docstring for why.
+    view_url = f"{BASE_URL}/report/view?src={quote(blob_url, safe='')}"
+
     subject = f"Diet Report for {req.patient_name}"
 
-    # Plain-text fallback (shown by clients that can't render HTML emails,
-    # or when a recipient's client prefers plain text) — includes the raw
-    # URL, since there's no way to make "click here" clickable without HTML.
     plain_body = (
         f"Your diet report for {req.patient_name} is ready.\n\n"
-        f"View it here: {report_url}\n\n"
+        f"View it here: {view_url}\n\n"
         "This link opens directly in your browser — no download needed."
     )
 
-    # HTML version — this is what most recipients will actually see:
-    # a short message with "click here" as the clickable link text.
     html_body = f"""
     <div style="font-family: Arial, Helvetica, sans-serif; font-size: 15px; color: #211915; line-height: 1.6;">
       <p>Your diet report for <strong>{req.patient_name}</strong> is ready — 
-      <a href="{report_url}" style="color: #143C6F; font-weight: 700;">click here to view it</a>.</p>
+      <a href="{view_url}" style="color: #143C6F; font-weight: 700;">click here to view it</a>.</p>
       <p style="color: #666; font-size: 13px;">This link opens directly in your browser — no download needed.</p>
     </div>
     """
@@ -157,5 +172,23 @@ def email_report(req: ReportEmailRequest):
     except smtplib.SMTPException as e:
         raise HTTPException(status_code=502, detail=f"Email provider rejected the send: {e}")
 
+    return {"ok": True, "view_url": view_url}
 
-    return {"ok": True, "report_url": report_url}
+
+# ─── Route: view the report inline ────────────────────────────────────────
+@router.get("/report/view", response_class=HTMLResponse)
+def view_report(src: str = Query(...)):
+    parsed = urlparse(src)
+    if parsed.scheme != "https" or not parsed.netloc.endswith(ALLOWED_BLOB_HOST_SUFFIX):
+        raise HTTPException(status_code=400, detail="Invalid report source.")
+
+    try:
+        resp = requests.get(src, timeout=15)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Couldn't load the report: {e}")
+
+    # No Content-Disposition set here at all, so the browser renders this
+    # inline like any normal webpage — this is the whole point of proxying
+    # through here instead of linking straight to the Blob URL.
+    return HTMLResponse(content=resp.text)
