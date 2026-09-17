@@ -54,13 +54,14 @@ import re
 import smtplib
 import ssl
 import uuid
+from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import quote, urlparse
 
 import requests
 import vercel_blob
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, EmailStr
 
@@ -78,6 +79,7 @@ FROM_EMAIL = os.environ.get("FROM_EMAIL", SMTP_USER)
 FROM_NAME = os.environ.get("FROM_NAME", "FurTuner")
 
 MAX_HTML_BYTES = 5_000_000  # ~5MB sanity cap on the incoming report HTML
+RETENTION_DAYS = 30  # reports older than this are auto-deleted by /report/cleanup
 
 # Only ever proxy URLs on Vercel Blob's own domain — this route fetches
 # and returns whatever URL it's given, so without this check it would be
@@ -192,3 +194,58 @@ def view_report(src: str = Query(...)):
     # inline like any normal webpage — this is the whole point of proxying
     # through here instead of linking straight to the Blob URL.
     return HTMLResponse(content=resp.text)
+
+
+# ─── Route: delete reports older than RETENTION_DAYS ─────────────────────
+# Call this on a schedule via a Vercel cron job — add to vercel.json:
+#   { "path": "/report/cleanup", "schedule": "0 3 * * *" }   (daily at 3am UTC)
+@router.get("/report/cleanup")
+def cleanup_old_reports(authorization: str = Header(default="")):
+    # Vercel auto-provides CRON_SECRET and sends it as this header when it
+    # invokes a cron job — checking it stops anyone else who finds this
+    # URL from triggering a mass-deletion of reports on demand.
+    cron_secret = os.environ.get("CRON_SECRET", "")
+    if cron_secret and authorization != f"Bearer {cron_secret}":
+        raise HTTPException(status_code=401, detail="Unauthorized.")
+
+    cutoff = datetime.now(timezone.utc).timestamp() - (RETENTION_DAYS * 86400)
+    deleted = []
+    cursor = None
+
+    while True:
+        opts = {"prefix": "reports/", "limit": "1000"}
+        if cursor:
+            opts["cursor"] = cursor
+
+        try:
+            listing = vercel_blob.list(opts)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Couldn't list reports: {e}")
+
+        blobs = listing.get("blobs", [])
+        to_delete = []
+        for blob in blobs:
+            uploaded_at_raw = blob.get("uploadedAt")
+            if not uploaded_at_raw:
+                continue
+            # uploadedAt comes back as an ISO 8601 string; handle a
+            # trailing "Z" (UTC) for compatibility with Python < 3.11.
+            uploaded_at_str = uploaded_at_raw.replace("Z", "+00:00") if isinstance(uploaded_at_raw, str) else None
+            if not uploaded_at_str:
+                continue
+            try:
+                uploaded_ts = datetime.fromisoformat(uploaded_at_str).timestamp()
+            except ValueError:
+                continue
+            if uploaded_ts < cutoff:
+                to_delete.append(blob["url"])
+
+        if to_delete:
+            vercel_blob.delete(to_delete)
+            deleted.extend(to_delete)
+
+        cursor = listing.get("cursor")
+        if not listing.get("hasMore") or not cursor:
+            break
+
+    return {"deleted_count": len(deleted)}
