@@ -1,0 +1,8 @@
+{
+  "name": "diet-report-pdf-render",
+  "private": true,
+  "dependencies": {
+    "@sparticuz/chromium": "^123.0.0",
+    "puppeteer-core": "^22.0.0"
+  }
+}

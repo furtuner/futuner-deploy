@@ -15,7 +15,7 @@ UPDATED: Now properly uses 'aafco_percent_of_minimum' field from backend
 
 from typing import List
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from urllib.parse import urlencode
 import webbrowser
@@ -86,7 +86,16 @@ def user_ingredients():
                 }
             )
 
-    return result
+    # Cached for an hour at Vercel's CDN/edge — this list only changes when the
+    # CSVs are updated and the app is redeployed, so there's no reason for every
+    # page load to re-run this function. stale-while-revalidate means a visitor
+    # never waits on a cold start even right after the cache expires: they get
+    # the (very slightly) stale cached copy instantly while Vercel refreshes it
+    # in the background for the next request.
+    return JSONResponse(
+        content=result,
+        headers={"Cache-Control": "public, max-age=3600, stale-while-revalidate=86400"},
+    )
 
 
 @router.get("/ingredients-grouped")

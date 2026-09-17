@@ -1,9 +1,14 @@
 {
   "version": 2,
   "builds": [
-    { "src": "main.py", "use": "@vercel/python" }
+    { "src": "main.py", "use": "@vercel/python" },
+    { "src": "api/render-pdf.js", "use": "@vercel/node" }
   ],
   "routes": [
+    { "src": "/api/render-pdf", "dest": "/api/render-pdf.js" },
     { "src": "/(.*)", "dest": "/main.py" }
+  ],
+  "crons": [
+    { "path": "/user-ingredients", "schedule": "*/5 * * * *" }
   ]
 }

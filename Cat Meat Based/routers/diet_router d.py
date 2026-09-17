@@ -1,21 +1,32 @@
 """
-Dog Diet Planner - API Router (UPDATED)
+Cat Diet Planner - API Router (UPDATED)
 
 This router provides endpoints for:
 - Ingredient management and selection
-- Diet calculation with automatic constraint balancing
+- Diet calculation with fixed allocation rules
 - HTML reports (diet composition, AAFCO compliance)
-- AAFCO Adult Maintenance compliance checking
+- AAFCO Adult Maintenance compliance checking (Feline)
 - Ingredients Summary with fresh weights
 
-UPDATED: Now properly uses 'aafco_percent_of_minimum' field from backend
-         and displays all 43+ nutrients with correct % of minimum values.
-         Added Ingredients Summary page showing fresh weights.
+FIXED ALLOCATION RULES (must total 1000g DM):
+- Meat A (Mandatory): A only=555g (545g with fruit) | A+B: A=480g (470g) | A+C: A=455g (445g) | A+B+C: A=430g (420g)
+- Liver: 170g alone / 110g with organ (organ gets 60g)
+- Grains + Potato combined (optional): 25g total
+- Vegetables (Mandatory, single group): 140g base, adjusted by grain/seeds (fruit no longer affects veg)
+- Fruits (optional): 10g — reduces Meat A by 10g
+- Fruits (optional): 20g, Oil (Mandatory): 8g
+- Seeds (optional): 10g max (reduces veg by 12g)
+
+DIET QUALITY TARGETS:
+- Protein %: 40–78%, Fat %: >15% <28%, CHO %: <18%, Fiber %: >2% <6.5%
+- Energy: 4000–5300 kcal/kg, Ca:P: >1.4:1 <2:1, Omega-6:Omega-3: >2 <6
+
+UPDATED: Uses corrected CSVs with proper folate/B12 and updated eggshells/wheatgerm.
 """
 
 from typing import List
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from urllib.parse import urlencode
 import webbrowser
@@ -51,27 +62,25 @@ def user_ingredients():
         "Organ Meat (Liver)",
         "Grain A",
         "Vegetable A",
-        "Vegetable B",
         "Fruit",
         "Oil",
+        "Fiber",
         "Mineral Group A",
-        "Mineral Group B",
     ]
 
     # Map internal category name -> display name with numeric prefix and requirements
     category_display = {
         "Meat Group A":        "01 Meat Group A (Mandatory - Select at least one and a maximum of three)",
-        "Meat Group B":        "02 Meat Group B (Optional - Select upto two maximum)",
-        "Meat Group C":        "03 Meat Group C (Optional - Select upto two maximum)",
-        "Organ Meat (Other)":  "04 Organ Meat - Other (Optional - Select upto three maximum)",
-        "Organ Meat (Liver)":  "05 Organ Meat - Liver (Mandatory - Select upto two maximum)",
-        "Grain A":             "06 Grain A (Mandatory - Select at least one and a maximum of three, fixed at 30%) [Quinoa, Tapioca, Potatoes, Sweet Potatoes]",
-        "Vegetable A":         "07 Vegetable A (Mandatory - Select at least one, up to three)",
-        "Vegetable B":         "08 Vegetable B (Optional - Select at least one, up to three)",
-        "Fruit":               "09 Fruit (Mandatory - Select upto three maximum)",
-        "Oil":                 "10 Oil (Mandatory - Select at least one and a maximum of three)",
-        "Mineral Group A":     "14 Mineral Group A (Mandatory)",
-        "Mineral Group B":     "15 Mineral Group B (Optional)",
+        "Meat Group B":        "02 Meat Group B (Optional - Pick up to two)",
+        "Meat Group C":        "03 Meat Group C (Optional - Pick up to two)",
+        "Organ Meat (Other)":  "04 Organ Meat - Other (Optional - Pick up to three)",
+        "Organ Meat (Liver)":  "05 Organ Meat - Liver (Mandatory - Pick up to 2)",
+        "Grain A":             "06 Grains & Potato (Optional - Select up to two maximum)",
+        "Vegetable A":         "07 Vegetables (Mandatory - Select at least one and up to three maximum)",
+        "Fruit":               "08 Fruit (Optional - Select up to three maximum)",
+        "Oil":                 "09 Oil (Mandatory - Select at least one and a maximum of three)",
+        "Fiber":               "10 Fiber/Seeds (Optional - Pick up to two maximum)",
+        "Mineral Group A":     "14 Mineral Group A",
     }
 
     result = []
@@ -84,16 +93,11 @@ def user_ingredients():
             result.append(
                 {
                     "ingredient_name": item["ingredient_name"],
-    # Cached for an hour at Vercel's CDN/edge — this list only changes when the
-    # CSVs are updated and the app is redeployed, so there's no reason for every
-    # page load to re-run this function. stale-while-revalidate means a visitor
-    # never waits on a cold start even right after the cache expires: they get
-    # the (very slightly) stale cached copy instantly while Vercel refreshes it
-    # in the background for the next request.
-    return JSONResponse(
-        content=result,
-        headers={"Cache-Control": "public, max-age=3600, stale-while-revalidate=86400"},
-    )
+                    "group_name": display_name,
+                }
+            )
+
+    return result
 
 
 @router.get("/ingredients-grouped")
@@ -155,37 +159,53 @@ def _generate_diet_report(request: Request, ingredients: List[str]):
     iron_mg = float(result.get("iron_mg", 0.0))     # mg/kg DM
 
     omega_ratio = (
-        result.get("Omega6_omega3_ratio")
+        result.get("omega6_omega3_ratio")
+        or result.get("Omega6_omega3_ratio")
         or result.get("Omega_6_3_ratio")
         or result.get("Omega_ratio")
         or None
     )
 
-    # Get fiber adjustment info
-    fiber_adjustments = result.get("fiber_adjustments", {})
-    fiber_was_adjusted = fiber_adjustments.get("was_adjusted", False)
+    # Get allocation summary info
+    allocation_summary = result.get("allocation_summary", {})
     
     # Get issues/warnings from backend
     issues = result.get("issues", [])
 
+    # ============================================================================
+    # PIE CHART: Calculate % of ENERGY from each macronutrient
+    # Formula from Excel:
+    #   Protein % of Energy = ((4 * Protein_pct) / Energy) * 1000
+    #   Fat % of Energy = ((9 * Fat_pct) / Energy) * 1000
+    #   CHO % of Energy = ((4 * CHO_pct) / Energy) * 1000
+    # Where: Protein=4 kcal/g, Fat=9 kcal/g, CHO=4 kcal/g
+    # ============================================================================
+    if energy > 0:
+        protein_energy_pct = ((4 * protein_pct) / energy) * 1000
+        fat_energy_pct = ((9 * fat_pct) / energy) * 1000
+        cho_energy_pct = ((4 * cho_pct) / energy) * 1000
+    else:
+        protein_energy_pct = 0
+        fat_energy_pct = 0
+        cho_energy_pct = 0
+
     # Get AAFCO % of minimum from backend (if available)
     aafco_pct = result.get("aafco_percent_of_minimum", {})
 
-    # ---- AAFCO Adult maintenance (dog) specs for the nutrients we track ----
-    # Now using aafco_percent_of_minimum from backend where available
-    # Note: Protein target is 32-40% (enforced by allocation algorithm)
+    # ---- AAFCO Cat Adult Maintenance — summary table ----
+    # min_value pulled live from svc.AAFCO_MINIMUMS (no hardcoded numbers)
     aafco_specs = [
         {
             "label": "Protein (% of DM)",
             "diet_value": protein_pct,
-            "min_value": 32.0,  # Target: 32-40%
-            "pct_of_min": aafco_pct.get("protein"),
+            "min_value": svc.AAFCO_MINIMUMS.get("Protein"),
+            "pct_of_min": aafco_pct.get("Protein"),
         },
         {
             "label": "Fat (% of DM)",
             "diet_value": fat_pct,
-            "min_value": 5.5,
-            "pct_of_min": aafco_pct.get("fat"),
+            "min_value": svc.AAFCO_MINIMUMS.get("Fat"),
+            "pct_of_min": aafco_pct.get("Fat"),
         },
         {
             "label": "Ash (% of DM)",
@@ -206,16 +226,16 @@ def _generate_diet_report(request: Request, ingredients: List[str]):
             "pct_of_min": None,
         },
         {
-            "label": "Calcium (% of DM)",
+            "label": "Ca (% of DM)",
             "diet_value": ca_pct,
-            "min_value": 0.6,
-            "pct_of_min": aafco_pct.get("calcium"),
+            "min_value": svc.AAFCO_MINIMUMS.get("Ca"),
+            "pct_of_min": aafco_pct.get("Ca"),
         },
         {
             "label": "Iron (mg/kg DM)",
             "diet_value": iron_mg,
-            "min_value": 40.0,
-            "pct_of_min": aafco_pct.get("iron"),
+            "min_value": svc.AAFCO_MINIMUMS.get("Iron"),
+            "pct_of_min": aafco_pct.get("Iron"),
         },
     ]
 
@@ -363,7 +383,7 @@ def _generate_diet_report(request: Request, ingredients: List[str]):
   </style>
 </head>
 <body>
-  <h1>Dog Diet Planner - Grain Free</h1>
+  <h1>Diet Composition & Macros</h1>
 
   <div class="chips">
     {"".join(f'<span class="chip">{ing}</span>' for ing in ingredients)}
@@ -411,10 +431,10 @@ def _generate_diet_report(request: Request, ingredients: List[str]):
     </table>
 
     <div id="chartContainer">
-      <h2>Macro Pie Chart (% of DM)</h2>
+      <h2>Macro Pie Chart (% of Energy)</h2>
       <canvas id="macroPie"></canvas>
       <div class="small-note">
-        Showing Protein / Fat / CHO as percent of total dry matter.
+        Showing energy contribution from Protein (4 kcal/g), Fat (9 kcal/g), CHO (4 kcal/g).
       </div>
     </div>
   </div>
@@ -520,7 +540,7 @@ def _generate_diet_report(request: Request, ingredients: List[str]):
       data: {{
         labels: ['Protein', 'Fat', 'CHO'],
         datasets: [{{
-          data: [{protein_pct:.2f}, {fat_pct:.2f}, {cho_pct:.2f}],
+          data: [{protein_energy_pct:.2f}, {fat_energy_pct:.2f}, {cho_energy_pct:.2f}],
           backgroundColor: [
             '#4CAF50',
             '#FF9800',
@@ -534,7 +554,7 @@ def _generate_diet_report(request: Request, ingredients: List[str]):
         responsive: true,
         plugins: {{
           legend: {{ position: 'bottom' }},
-          title: {{ display: true, text: 'Macronutrient Composition (% of DM)' }},
+          title: {{ display: true, text: 'Energy Contribution (% of Total kcal)' }},
           datalabels: {{
             formatter: (value) => value.toFixed(1) + '%',
             color: '#ffffff',
@@ -651,7 +671,7 @@ def _generate_ingredients_summary(ingredients: List[str]):
     </tr>
     """
 
-    # Diet energy (kcal/kg DM) — used for the Daily Feeding Plan tab
+    # Diet energy for the feeding plan
     diet_energy_kcal_per_kg = float(result.get("Energy", 0.0))
 
     html = f"""
@@ -663,13 +683,13 @@ def _generate_ingredients_summary(ingredients: List[str]):
   <style>
     body {{
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      margin: 20px;
+      margin: 0;
       background: linear-gradient(135deg, #2e7d32 0%, #43a047 100%);
       min-height: 100vh;
       padding: 20px;
     }}
     .container {{
-      max-width: 860px;
+      max-width: 900px;
       margin: 0 auto;
       background: white;
       border-radius: 12px;
@@ -689,6 +709,7 @@ def _generate_ingredients_summary(ingredients: List[str]):
       margin-bottom: 18px;
       font-size: 14px;
     }}
+    /* --- Tab bar --- */
     .tab-bar {{
       display: flex;
       border-bottom: 2px solid #2e7d32;
@@ -716,6 +737,7 @@ def _generate_ingredients_summary(ingredients: List[str]):
     }}
     .tab-panel {{ display: none; }}
     .tab-panel.active {{ display: block; }}
+    /* --- Shared table styles --- */
     table {{
       width: 100%;
       border-collapse: collapse;
@@ -745,6 +767,7 @@ def _generate_ingredients_summary(ingredients: List[str]):
     }}
     .total-row {{ background-color: #e8f5e9; border-top: 2px solid #2e7d32; }}
     .total-row td {{ border-bottom: none; }}
+    /* --- Note / formula boxes --- */
     .note {{
       margin-top: 18px;
       padding: 14px;
@@ -783,9 +806,10 @@ def _generate_ingredients_summary(ingredients: List[str]):
       gap: 8px;
     }}
     .print-btn:hover {{ background: linear-gradient(135deg, #1b5e20 0%, #2e7d32 100%); }}
+    /* --- Daily Feeding Plan --- */
     .energy-panel {{
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr 1fr 1fr;
       gap: 16px;
       margin-bottom: 18px;
     }}
@@ -804,20 +828,21 @@ def _generate_ingredients_summary(ingredients: List[str]):
       letter-spacing: 0.04em;
       margin-bottom: 8px;
     }}
-    .energy-card input {{
+    .energy-card input, .energy-card select {{
       width: 100%;
       padding: 9px 10px;
-      font-size: 18px;
+      font-size: 16px;
       border: 1.5px solid #a5d6a7;
       border-radius: 6px;
       box-sizing: border-box;
-      font-family: 'Courier New', monospace;
+      font-family: 'Segoe UI', sans-serif;
       font-weight: 700;
       color: #1b5e20;
+      background: white;
     }}
     .derived-row {{
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(5, 1fr);
       gap: 12px;
       background: #f4faf4;
       border: 1px solid #c8e6c9;
@@ -860,8 +885,9 @@ def _generate_ingredients_summary(ingredients: List[str]):
 <body>
   <div class="container">
     <h1>🥗 Ingredients Summary</h1>
-    <div class="subtitle">Fresh weights and daily feeding plan for your homemade dog diet recipe</div>
+    <div class="subtitle">Fresh weights and daily feeding plan for your homemade cat raw diet recipe</div>
 
+    <!-- Tab bar -->
     <div class="tab-bar">
       <button class="tab-btn active" onclick="switchTab('summary', this)">📋 Ingredients Summary</button>
       <button class="tab-btn" onclick="switchTab('feeding', this)">🐾 Daily Feeding Plan</button>
@@ -898,11 +924,20 @@ def _generate_ingredients_summary(ingredients: List[str]):
     <!-- Tab 2: Daily Feeding Plan -->
     <div id="tab-feeding" class="tab-panel">
 
+      <!-- Cat RER calculator -->
       <div class="energy-panel">
         <div class="energy-card">
-          <label>🐕 Dog Daily Energy Need (kcal)</label>
-          <input type="number" id="dogEnergy" min="1" step="1" placeholder="e.g. 546"
+          <label>🐱 Cat Body Weight (kg)</label>
+          <input type="number" id="catWeight" min="0.1" step="0.1" placeholder="e.g. 4.5"
                  oninput="recalc()" />
+        </div>
+        <div class="energy-card">
+          <label>🐱 Life Stage</label>
+          <select id="lifeStage" onchange="recalc()">
+            <option value="1.4">Adult intact (RER × 1.4)</option>
+            <option value="1.2" selected>Neutered adult (RER × 1.2)</option>
+            <option value="1.0">Obese adult (RER × 1.0)</option>
+          </select>
         </div>
         <div class="energy-card">
           <label>⚡ Diet Energy — AAFCO (kcal/kg DM)</label>
@@ -911,25 +946,31 @@ def _generate_ingredients_summary(ingredients: List[str]):
         </div>
       </div>
 
-      <div class="derived-row" id="derivedRow">
-        <div class="derived-item">
-          <div class="derived-label">Dog daily energy need</div>
-          <div class="derived-val" id="dv_dogEnergy">—</div>
+      <!-- Derived summary row -->
+      <div class="derived-row">
+        <div>
+          <div class="derived-label">RER (kcal)</div>
+          <div class="derived-val" id="dv_rer">—</div>
         </div>
-        <div class="derived-item">
-          <div class="derived-label">Diet energy (AAFCO report)</div>
+        <div>
+          <div class="derived-label">Cat daily energy (DER)</div>
+          <div class="derived-val" id="dv_catEnergy">—</div>
+        </div>
+        <div>
+          <div class="derived-label">Diet energy (AAFCO)</div>
           <div class="derived-val" id="dv_dietEnergy">{diet_energy_kcal_per_kg:.0f} kcal/kg</div>
         </div>
-        <div class="derived-item">
+        <div>
           <div class="derived-label">Daily food intake (g DM)</div>
           <div class="derived-val" id="dv_dailyIntake">—</div>
         </div>
-        <div class="derived-item">
-          <div class="derived-label">% of food intake of total mix</div>
+        <div>
+          <div class="derived-label">% of total mix</div>
           <div class="derived-val" id="dv_pct">—</div>
         </div>
       </div>
 
+      <!-- Per-ingredient batch table -->
       <div id="planSection" style="display:none">
         <div class="plan-title">🥩 Fresh weight to serve per batch (g)</div>
         <table class="days-table">
@@ -948,17 +989,18 @@ def _generate_ingredients_summary(ingredients: List[str]):
 
         <div class="note" style="margin-top:14px">
           <strong>How this works:</strong>
-          Daily DM intake (g) = Dog energy ÷ Diet energy × 1000.
+          RER (kcal) = 70 × W_kg^0.75. DER = RER × life stage factor.
+          Daily DM intake (g) = DER ÷ Diet energy × 1000.
           Fresh weight = DM ÷ (1 − water%/100). Multiply by days for each batch size.
         </div>
       </div>
 
       <div id="energyHint" style="margin-top:18px;color:#888;font-size:13px;">
-        ↑ Enter your dog's daily energy need above to generate the feeding plan.
+        ↑ Enter your cat's body weight above to generate the feeding plan.
       </div>
-    </div>
+    </div><!-- /tab-feeding -->
 
-  </div>
+  </div><!-- /container -->
 
 <script>
   function switchTab(id, btn) {{
@@ -982,13 +1024,15 @@ def _generate_ingredients_summary(ingredients: List[str]):
   ];
 
   function recalc() {{
-    const dogEnergy  = parseFloat(document.getElementById('dogEnergy').value);
+    const catWeight  = parseFloat(document.getElementById('catWeight').value);
+    const lifeFactor = parseFloat(document.getElementById('lifeStage').value);
     const dietEnergy = parseFloat(document.getElementById('dietEnergy').value);
     const hint = document.getElementById('energyHint');
-    const plan  = document.getElementById('planSection');
+    const plan = document.getElementById('planSection');
 
-    if (!dogEnergy || dogEnergy <= 0 || !dietEnergy || dietEnergy <= 0) {{
-      document.getElementById('dv_dogEnergy').textContent  = '—';
+    if (!catWeight || catWeight <= 0 || !dietEnergy || dietEnergy <= 0) {{
+      document.getElementById('dv_rer').textContent         = '—';
+      document.getElementById('dv_catEnergy').textContent   = '—';
       document.getElementById('dv_dailyIntake').textContent = '—';
       document.getElementById('dv_pct').textContent         = '—';
       plan.style.display = 'none';
@@ -996,13 +1040,16 @@ def _generate_ingredients_summary(ingredients: List[str]):
       return;
     }}
 
-    const dailyDM = (dogEnergy / dietEnergy) * 1000.0;
-    const pct     = (dailyDM / TOTAL_DM) * 100.0;
+    const rer       = 70 * Math.pow(catWeight, 0.75);
+    const catEnergy = rer * lifeFactor;
+    const dailyDM   = (catEnergy / dietEnergy) * 1000.0;
+    const pct       = (dailyDM / TOTAL_DM) * 100.0;
 
-    document.getElementById('dv_dogEnergy').textContent   = dogEnergy.toFixed(0) + ' kcal';
-    document.getElementById('dv_dietEnergy').textContent  = dietEnergy.toFixed(0) + ' kcal/kg';
-    document.getElementById('dv_dailyIntake').textContent = dailyDM.toFixed(1) + ' g';
-    document.getElementById('dv_pct').textContent         = pct.toFixed(2) + '%';
+    document.getElementById('dv_rer').textContent          = rer.toFixed(1) + ' kcal';
+    document.getElementById('dv_catEnergy').textContent    = catEnergy.toFixed(1) + ' kcal';
+    document.getElementById('dv_dietEnergy').textContent   = dietEnergy.toFixed(0) + ' kcal/kg';
+    document.getElementById('dv_dailyIntake').textContent  = dailyDM.toFixed(1) + ' g';
+    document.getElementById('dv_pct').textContent          = pct.toFixed(2) + '%';
     hint.style.display = 'none';
 
     const days = [1, 3, 5, 7, 10];
@@ -1015,13 +1062,7 @@ def _generate_ingredients_summary(ingredients: List[str]):
       const ingDailyDM    = frac * dailyDM;
       const wf            = water_pct / 100.0;
       let ingDailyFresh   = wf < 1.0 ? ingDailyDM / (1.0 - wf) : ingDailyDM;
-      // EXCEPTION: Oyster canned applies a proportional scaling correction of 10/14.9
-      // for this batch table only. water_pct (85.1) is read and used completely unchanged;
-      // the CSV is never modified. This scales the result down to reflect an 11g DM basis
-      // instead of 14.9g, while keeping the value dynamic with the dog's energy needs.
-      if (name === "oyster canned") {{
-        ingDailyFresh = ingDailyFresh * (10.0 / 14.9);
-      }}
+      if (name === "oyster canned") {{ ingDailyFresh = ingDailyFresh * (10.0 / 14.9); }}
 
       let rowFresh = `<tr><td>${{name}}</td>`;
       days.forEach((d, i) => {{
@@ -1086,70 +1127,73 @@ def _generate_aafco_report(ingredients: List[str]):
         return val if val is not None else None
 
     # ==================== DEFINE ALL NUTRIENTS ====================
-    # Structure: (name, unit, result_key, aafco_pct_key, aafco_min)
-    # Note: Protein target is 32-40% (enforced by allocation algorithm)
-    
+    # ==================== DEFINE ALL NUTRIENTS ====================
+    # Tuples: (name, unit, result_key, aafco_key, aafco_min) or
+    #         (name, unit, result_key, aafco_key, aafco_min, aafco_max)
+    # All min/max values pulled live from svc.AAFCO_MINIMUMS / svc.AAFCO_MAXIMUMS
+    # Keys match the Excel column names exactly.
+
     nutrients_config = {
         "Macronutrients": [
-            ("Energy", "kcal/kg DM", "Energy", None, None),
-            ("Protein", "% DM", "Protein_percent", "protein", 18.0),  # Target: 32-40%
-            ("Fat", "% DM", "Fat_percent", "fat", 5.5),
-            ("Carbohydrate", "% DM", "CHO_percent", None, None),
-            ("Fiber", "% DM", "Fiber_percent", None, None),
-            ("Ash", "% DM", "Ash_percent", None, None),
+            ("Diet Energy",        "kcal/kg DM", "Energy",          None,       None),
+            ("Protein",            "% DM",       "Protein_percent", "Protein",  svc.AAFCO_MINIMUMS.get("Protein")),
+            ("Fat",                "% DM",       "Fat_percent",     "Fat",      svc.AAFCO_MINIMUMS.get("Fat")),
+            ("Carbohydrate (CHO)", "% DM",       "CHO_percent",     None,       None),
+            ("Fiber",              "% DM",       "Fiber_percent",   None,       None),
+            ("Ash",                "% DM",       "Ash_percent",     None,       None),
         ],
-        "Minerals (% of Dry Matter)": [
-            ("Calcium (Ca)", "% DM", "Ca_percent", "calcium", 0.6),
-            ("Phosphorus (P)", "% DM", "P_percent", "phosphorus", 0.4),
-            ("Magnesium (Mg)", "% DM", "Mg_percent", "magnesium", 0.06),
-            ("Potassium (K)", "% DM", "K_percent", "potassium", 0.6),
-            ("Sodium (Na)", "% DM", "Na_percent", "sodium", 0.08),
+        "Major Minerals (% DM)": [
+            ("Ca",  "% DM", "Ca_percent",  "Ca",  svc.AAFCO_MINIMUMS.get("Ca")),
+            ("P",   "% DM", "P_percent",   "P",   svc.AAFCO_MINIMUMS.get("P")),
+            ("Mg",  "% DM", "Mg_percent",  "Mg",  svc.AAFCO_MINIMUMS.get("Mg")),
+            ("K",   "% DM", "K_percent",   "K",   svc.AAFCO_MINIMUMS.get("K")),
+            ("Na",  "% DM", "Na_percent",  "Na",  svc.AAFCO_MINIMUMS.get("Na")),
         ],
-        "Trace Minerals (mg/kg Dry Matter)": [
-            ("Iron (Fe)", "mg/kg DM", "iron_mg_kg", "iron", 40.0),
-            ("Zinc (Zn)", "mg/kg DM", "zn_mg_kg", "zinc", 80.0),
-            ("Copper (Cu)", "mg/kg DM", "cu_mg_kg", "copper", 7.3),
-            ("Iodine (I)", "mg/kg DM", "iodine_mg_kg", "iodine", 1.0),
-            ("Selenium (Se)", "mg/kg DM", "se_mg_kg", "selenium", 0.35),
+        "Trace Minerals (mg/kg DM)": [
+            ("Iron",   "mg/kg DM", "iron_mg_kg",   "Iron",   svc.AAFCO_MINIMUMS.get("Iron"),   svc.AAFCO_MAXIMUMS.get("Iron")),
+            ("Zn",     "mg/kg DM", "zn_mg_kg",     "Zn",     svc.AAFCO_MINIMUMS.get("Zn"),     svc.AAFCO_MAXIMUMS.get("Zn")),
+            ("Cu",     "mg/kg DM", "cu_mg_kg",     "Cu",     svc.AAFCO_MINIMUMS.get("Cu"),     svc.AAFCO_MAXIMUMS.get("Cu")),
+            ("Iodine", "mg/kg DM", "iodine_mg_kg", "Iodine", svc.AAFCO_MINIMUMS.get("Iodine"), svc.AAFCO_MAXIMUMS.get("Iodine")),
+            ("Se",     "mg/kg DM", "se_mg_kg",     "Se",     svc.AAFCO_MINIMUMS.get("Se"),     svc.AAFCO_MAXIMUMS.get("Se")),
         ],
         "Vitamins": [
-            ("Vitamin A", "IU/kg DM", "vitamin_a_iu_kg", "vitamin_a", 5000.0),
-            ("Vitamin D", "IU/kg DM", "vitamin_d_iu_kg", "vitamin_d", 500.0),
-            ("Vitamin E", "mg/kg DM", "vitamin_e_iu_kg", "vitamin_e", 34.0),
-            ("Thiamin (B1)", "mg/kg DM", "thiamin_mg_kg", "thiamin", 2.25),
-            ("Riboflavin (B2)", "mg/kg DM", "riboflavin_mg_kg", "riboflavin", 5.2),
-            ("Niacin (B3)", "mg/kg DM", "niacin_mg_kg", "niacin", 13.6),
-            ("Pantothenic Acid (B5)", "mg/kg DM", "pantothenic_acid_mg_kg", "pantothenic_acid", 12.0),
-            ("Folic Acid (Folate)", "mg/kg DM", "folate_mg_kg", "folate", 0.216),
-            ("Cobalamin (B12)", "mg/kg DM", "b12_mg_kg", "vitamin_b12", 0.022),
+            ("Thiamin",          "mg/kg DM", "thiamin_mg_kg",          "Thiamin",          svc.AAFCO_MINIMUMS.get("Thiamin")),
+            ("Riboflavin",       "mg/kg DM", "riboflavin_mg_kg",       "Riboflavin",       svc.AAFCO_MINIMUMS.get("Riboflavin")),
+            ("Niacin",           "mg/kg DM", "niacin_mg_kg",           "Niacin",           svc.AAFCO_MINIMUMS.get("Niacin")),
+            ("Pantothenic acid", "mg/kg DM", "pantothenic_acid_mg_kg", "Pantothenic_acid", svc.AAFCO_MINIMUMS.get("Pantothenic_acid")),
+            ("Folate",           "mg/kg DM", "folate_mg_kg",           "Folate",           svc.AAFCO_MINIMUMS.get("Folate")),
+            ("B-12",             "mg/kg DM", "b12_mg_kg",              "B12",              svc.AAFCO_MINIMUMS.get("B12")),
+            ("Vitamin A",        "IU/kg DM", "vitamin_a_iu_kg",        "Vitamin_A",        svc.AAFCO_MINIMUMS.get("Vitamin_A"),  svc.AAFCO_MAXIMUMS.get("Vitamin_A")),
+            ("Vitamin E",        "mg/kg DM", "vitamin_e_iu_kg",        "Vitamin_E",        svc.AAFCO_MINIMUMS.get("Vitamin_E")),
+            ("Vitamin D",        "IU/kg DM", "vitamin_d_iu_kg",        "Vitamin_D",        svc.AAFCO_MINIMUMS.get("Vitamin_D"),  svc.AAFCO_MAXIMUMS.get("Vitamin_D")),
         ],
-        "Essential Fatty Acids": [
-            ("Linoleic Acid (18:2 n-6)", "% DM", "linoleic_percent", "linoleic_acid", 1.3),
-            ("α-Linolenic Acid (18:3 n-3)", "% DM", "ala_percent", "alpha_linolenic_acid", 0.08),
-            ("EPA (20:5 n-3)", "% DM", "epa_percent", "epa", 0.05),
-            ("DHA (22:6 n-3)", "% DM", "dha_percent", "dha", 0.05),
+        "Fatty Acids (% DM)": [
+            ("18:2 (Linoleic, Omega-6)",       "% DM", "linoleic_percent", "FA_18_2", svc.AAFCO_MINIMUMS.get("FA_18_2")),
+            ("18:3 (Alpha-linolenic, Omega-3)", "% DM", "ala_percent",     "FA_18_3", svc.AAFCO_MINIMUMS.get("FA_18_3")),
+            ("EPA (20:5)",                     "% DM", "epa_percent",     "EPA",     svc.AAFCO_MINIMUMS.get("EPA")),
+            ("DHA (22:6)",                     "% DM", "dha_percent",     "DHA",     svc.AAFCO_MINIMUMS.get("DHA")),
         ],
-        "Essential Amino Acids": [
-            ("Arginine", "% DM", "arginine_percent", "arginine", 0.51),
-            ("Isoleucine", "% DM", "isoleucine_percent", "isoleucine", 0.38),
-            ("Leucine", "% DM", "leucine_percent", "leucine", 0.68),
-            ("Lysine", "% DM", "lysine_percent", "lysine", 0.63),
-            ("Methionine", "% DM", "methionine_percent", "methionine", 0.33),
-            ("Phenylalanine", "% DM", "phenylalanine_percent", "phenylalanine", 0.45),
-            ("Threonine", "% DM", "threonine_percent", "threonine", 0.48),
-            ("Tryptophan", "% DM", "tryptophan_percent", "tryptophan", 0.16),
-            ("Tyrosine", "% DM", "tyrosine_percent", "tyrosine", 0.18),
-            ("Valine", "% DM", "valine_percent", "valine", 0.49),
+        "Amino Acids (% DM)": [
+            ("Tryptophan",    "% DM", "tryptophan_percent",    "Tryptophan",    svc.AAFCO_MINIMUMS.get("Tryptophan")),
+            ("Threonine",     "% DM", "threonine_percent",     "Threonine",     svc.AAFCO_MINIMUMS.get("Threonine")),
+            ("Isoleucine",    "% DM", "isoleucine_percent",    "Isoleucine",    svc.AAFCO_MINIMUMS.get("Isoleucine")),
+            ("Leucine",       "% DM", "leucine_percent",       "Leucine",       svc.AAFCO_MINIMUMS.get("Leucine")),
+            ("Lysine",        "% DM", "lysine_percent",        "Lysine",        svc.AAFCO_MINIMUMS.get("Lysine")),
+            ("Methionine",    "% DM", "methionine_percent",    "Methionine",    svc.AAFCO_MINIMUMS.get("Methionine")),
+            ("Phenylalanine", "% DM", "phenylalanine_percent", "Phenylalanine", svc.AAFCO_MINIMUMS.get("Phenylalanine")),
+            ("Tyrosine",      "% DM", "tyrosine_percent",      "Tyrosine",      svc.AAFCO_MINIMUMS.get("Tyrosine")),
+            ("Valine",        "% DM", "valine_percent",        "Valine",        svc.AAFCO_MINIMUMS.get("Valine")),
+            ("Arginine",      "% DM", "arginine_percent",      "Arginine",      svc.AAFCO_MINIMUMS.get("Arginine")),
         ],
     }
 
     # ==================== BUILD HTML TABLE ====================
-    def get_status(diet_val, aafco_min, pct_of_min):
-        """Return status indicator based on AAFCO compliance"""
+    def get_status(diet_val, aafco_min, aafco_max, pct_of_min):
+        """Return status: checks max first, then min."""
+        if aafco_max is not None and diet_val > aafco_max:
+            return "✗ over max", "danger"
         if aafco_min is None:
             return "—", "neutral"
-        
-        # Use pct_of_min if available (it's a ratio, 1.0 = 100%)
         if pct_of_min is not None:
             if pct_of_min >= 1.0:
                 return "✓", "success"
@@ -1157,51 +1201,44 @@ def _generate_aafco_report(ingredients: List[str]):
                 return "⚠", "warning"
             else:
                 return "✗", "danger"
-        
-        # Fallback to manual calculation
-        if aafco_min is not None and diet_val < aafco_min:
-            if diet_val >= aafco_min * 0.9:
-                return "⚠", "warning"
-            else:
-                return "✗", "danger"
-        
+        if diet_val < aafco_min:
+            return ("⚠", "warning") if diet_val >= aafco_min * 0.9 else ("✗", "danger")
         return "✓", "success"
-    
+
     table_html = ""
     for category, nutrients in nutrients_config.items():
-        # Category header
         table_html += f"""
         <tr class="category-header">
-            <td colspan="6"><strong>{category}</strong></td>
+            <td colspan="7"><strong>{category}</strong></td>
         </tr>
         """
-        
-        # Nutrients in this category
         for nutrient_tuple in nutrients:
-            name, unit, result_key, aafco_key, aafco_min = nutrient_tuple
-            
-            # Get diet value from result
-            diet_val = get_val(result_key, 0.0)
-            
-            # Get % of minimum from backend (if available)
+            # 5-element tuple: no max; 6-element: has max (max kept for status check only)
+            name, unit, result_key, aafco_key, aafco_min = nutrient_tuple[:5]
+            aafco_max = nutrient_tuple[5] if len(nutrient_tuple) > 5 else None
+
+            diet_val   = get_val(result_key, 0.0)
             pct_of_min = get_pct(aafco_key) if aafco_key else None
-            
-            # Format values
-            diet_str = f"{diet_val:.2f}"
-            min_str = f"{aafco_min:.2f}" if aafco_min is not None else "—"
-            
-            # Calculate/display percentages
+
+            # Format as plain decimal — never scientific notation
+            def fmt_num(v):
+                if v is None: return "—"
+                if v == int(v): return str(int(v))
+                s = f"{v:.6f}".rstrip("0").rstrip(".")
+                return s
+
+            diet_str = fmt_num(diet_val)
+            min_str  = fmt_num(aafco_min)
+
             if pct_of_min is not None:
                 pct_min_str = f"{pct_of_min * 100:.1f}%"
             elif aafco_min is not None and aafco_min > 0:
-                pct_min = (diet_val / aafco_min) * 100.0
-                pct_min_str = f"{pct_min:.1f}%"
+                pct_min_str = f"{(diet_val / aafco_min) * 100:.1f}%"
             else:
                 pct_min_str = "—"
-            
-            # Get status
-            status_icon, status_class = get_status(diet_val, aafco_min, pct_of_min)
-            
+
+            status_icon, status_class = get_status(diet_val, aafco_min, aafco_max, pct_of_min)
+
             table_html += f"""
             <tr>
                 <td>{name}</td>
@@ -1212,7 +1249,7 @@ def _generate_aafco_report(ingredients: List[str]):
                 <td class="status status-{status_class}">{status_icon}</td>
             </tr>
             """
-    
+
     # Full HTML page
     html = f"""
 <!DOCTYPE html>
@@ -1358,8 +1395,8 @@ def _generate_aafco_report(ingredients: List[str]):
 </head>
 <body>
   <div class="container">
-    <h1>Dog Diet Planner - Grain Free</h1>
-    <div class="subtitle">Comprehensive analysis of all 43+ tracked nutrients with AAFCO 2024 standards</div>
+    <h1>🐱 AAFCO Adult Maintenance - Complete Nutrient Analysis</h1>
+    <div class="subtitle">Comprehensive analysis of all 43+ tracked nutrients with AAFCO 2024 Feline standards</div>
     
     <div class="chips">
       {"".join(f'<span class="chip">{ing}</span>' for ing in ingredients)}
@@ -1404,7 +1441,7 @@ def _generate_aafco_report(ingredients: List[str]):
     </div>
 
     <div class="note">
-      <strong>Note:</strong> All values are per 1000g (1kg) of dry matter (DM). AAFCO standards represent adult maintenance requirements for dogs. 
+      <strong>Note:</strong> All values are per 1000g (1kg) of dry matter (DM). AAFCO standards represent adult maintenance requirements for cats. 
       Values shown are based on AAFCO 2024 Official Publication. Nutrients with "—" have no established minimum requirements.
     </div>
   </div>

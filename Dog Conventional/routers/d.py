@@ -3,19 +3,30 @@ Dog Diet Planner - API Router (UPDATED)
 
 This router provides endpoints for:
 - Ingredient management and selection
-- Diet calculation with automatic constraint balancing
+- Diet calculation with fixed allocation rules
 - HTML reports (diet composition, AAFCO compliance)
 - AAFCO Adult Maintenance compliance checking
 - Ingredients Summary with fresh weights
 
-UPDATED: Now properly uses 'aafco_percent_of_minimum' field from backend
-         and displays all 43+ nutrients with correct % of minimum values.
-         Added Ingredients Summary page showing fresh weights.
+FIXED ALLOCATION RULES (must total 1000g DM):
+- Meat: 205g (A only: 200g | A+B: 155+50 | A+B+C: 115+40+50)
+- Grains: 350g (A only: 350g | A+B: 250+100) — Grain B reduced by 50g if potato selected
+- Vegetable C (Potato): 50g optional — taken from Grain B
+- Liver: 155g alone / 125g with organ (organ gets 30g)
+- Vegetables: 130g (A:90 + B:40) — reduced to 120g if seeds selected (A:85 + B:35)
+- Fruits: 20g, Oil: 10g
+- Seeds (optional): 10g (reduces veg by 10g total)
+
+DIET QUALITY TARGETS:
+- Protein %: 32–40%, Fat %: >12% <17%, CHO %: >30% <45%, Fiber %: >3% <6%
+- Energy: 4000–4500 kcal/kg, Ca:P: >1.4:1 <2:1, Omega-6:Omega-3: >2 <6
+
+UPDATED: Uses corrected CSVs with proper folate/B12 and updated eggshells/wheatgerm.
 """
 
 from typing import List
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from urllib.parse import urlencode
 import webbrowser
@@ -50,10 +61,13 @@ def user_ingredients():
         "Organ Meat (Other)",
         "Organ Meat (Liver)",
         "Grain A",
+        "Grain B",
         "Vegetable A",
         "Vegetable B",
+        "Vegetable C",
         "Fruit",
         "Oil",
+        "Fiber",
         "Mineral Group A",
         "Mineral Group B",
     ]
@@ -61,15 +75,18 @@ def user_ingredients():
     # Map internal category name -> display name with numeric prefix and requirements
     category_display = {
         "Meat Group A":        "01 Meat Group A (Mandatory - Select at least one and a maximum of three)",
-        "Meat Group B":        "02 Meat Group B (Optional - Select upto two maximum)",
-        "Meat Group C":        "03 Meat Group C (Optional - Select upto two maximum)",
-        "Organ Meat (Other)":  "04 Organ Meat - Other (Optional - Select upto three maximum)",
-        "Organ Meat (Liver)":  "05 Organ Meat - Liver (Mandatory - Select upto two maximum)",
-        "Grain A":             "06 Grain A (Mandatory - Select at least one and a maximum of three, fixed at 30%) [Quinoa, Tapioca, Potatoes, Sweet Potatoes]",
-        "Vegetable A":         "07 Vegetable A (Mandatory - Select at least one, up to three)",
-        "Vegetable B":         "08 Vegetable B (Optional - Select at least one, up to three)",
-        "Fruit":               "09 Fruit (Mandatory - Select upto three maximum)",
-        "Oil":                 "10 Oil (Mandatory - Select at least one and a maximum of three)",
+        "Meat Group B":        "02 Meat Group B (Optional - Pick up to two maximum)",
+        "Meat Group C":        "03 Meat Group C (Optional - Pick up to two maximum)",
+        "Organ Meat (Other)":  "04 Organ Meat - Other (Optional - Pick up to three maximum)",
+        "Organ Meat (Liver)":  "05 Organ Meat - Liver (Mandatory - Select one up to two maximum)",
+        "Grain A":             "06 Grain A (Mandatory - Select at least one and a maximum of three)",
+        "Grain B":             "07 Grain B (Optional - Pick up to two maximum)",
+        "Vegetable A":         "08 Vegetable A (Mandatory - Select at least one and up to three maximum)",
+        "Vegetable B":         "09 Vegetable B (Optional - Pick up to three maximum)",
+        "Vegetable C":         "10 Vegetable C - Potatoes (Optional - Pick up to one)",
+        "Fruit":               "11 Fruit (Mandatory - Select at least one and up to three maximum)",
+        "Oil":                 "12 Oil (Mandatory - Select at least one and a maximum of three)",
+        "Fiber":               "13 Others (Optional - Pick up to two maximum)",
         "Mineral Group A":     "14 Mineral Group A (Mandatory)",
         "Mineral Group B":     "15 Mineral Group B (Optional)",
     }
@@ -84,16 +101,11 @@ def user_ingredients():
             result.append(
                 {
                     "ingredient_name": item["ingredient_name"],
-    # Cached for an hour at Vercel's CDN/edge — this list only changes when the
-    # CSVs are updated and the app is redeployed, so there's no reason for every
-    # page load to re-run this function. stale-while-revalidate means a visitor
-    # never waits on a cold start even right after the cache expires: they get
-    # the (very slightly) stale cached copy instantly while Vercel refreshes it
-    # in the background for the next request.
-    return JSONResponse(
-        content=result,
-        headers={"Cache-Control": "public, max-age=3600, stale-while-revalidate=86400"},
-    )
+                    "group_name": display_name,  # this is what frontend sees
+                }
+            )
+
+    return result
 
 
 @router.get("/ingredients-grouped")
@@ -155,18 +167,35 @@ def _generate_diet_report(request: Request, ingredients: List[str]):
     iron_mg = float(result.get("iron_mg", 0.0))     # mg/kg DM
 
     omega_ratio = (
-        result.get("Omega6_omega3_ratio")
+        result.get("omega6_omega3_ratio")
+        or result.get("Omega6_omega3_ratio")
         or result.get("Omega_6_3_ratio")
         or result.get("Omega_ratio")
         or None
     )
 
-    # Get fiber adjustment info
-    fiber_adjustments = result.get("fiber_adjustments", {})
-    fiber_was_adjusted = fiber_adjustments.get("was_adjusted", False)
+    # Get allocation summary info
+    allocation_summary = result.get("allocation_summary", {})
     
     # Get issues/warnings from backend
     issues = result.get("issues", [])
+
+    # ============================================================================
+    # PIE CHART: Calculate % of ENERGY from each macronutrient
+    # Formula from Excel:
+    #   Protein % of Energy = ((4 * Protein_pct) / Energy) * 1000
+    #   Fat % of Energy = ((9 * Fat_pct) / Energy) * 1000
+    #   CHO % of Energy = ((4 * CHO_pct) / Energy) * 1000
+    # Where: Protein=4 kcal/g, Fat=9 kcal/g, CHO=4 kcal/g
+    # ============================================================================
+    if energy > 0:
+        protein_energy_pct = ((4 * protein_pct) / energy) * 1000
+        fat_energy_pct = ((9 * fat_pct) / energy) * 1000
+        cho_energy_pct = ((4 * cho_pct) / energy) * 1000
+    else:
+        protein_energy_pct = 0
+        fat_energy_pct = 0
+        cho_energy_pct = 0
 
     # Get AAFCO % of minimum from backend (if available)
     aafco_pct = result.get("aafco_percent_of_minimum", {})
@@ -178,7 +207,7 @@ def _generate_diet_report(request: Request, ingredients: List[str]):
         {
             "label": "Protein (% of DM)",
             "diet_value": protein_pct,
-            "min_value": 32.0,  # Target: 32-40%
+            "min_value": 18.0,  # Target: 32-40%
             "pct_of_min": aafco_pct.get("protein"),
         },
         {
@@ -363,7 +392,7 @@ def _generate_diet_report(request: Request, ingredients: List[str]):
   </style>
 </head>
 <body>
-  <h1>Dog Diet Planner - Grain Free</h1>
+  <h1>Diet Composition & Macros</h1>
 
   <div class="chips">
     {"".join(f'<span class="chip">{ing}</span>' for ing in ingredients)}
@@ -411,10 +440,10 @@ def _generate_diet_report(request: Request, ingredients: List[str]):
     </table>
 
     <div id="chartContainer">
-      <h2>Macro Pie Chart (% of DM)</h2>
+      <h2>Macro Pie Chart (% of Energy)</h2>
       <canvas id="macroPie"></canvas>
       <div class="small-note">
-        Showing Protein / Fat / CHO as percent of total dry matter.
+        Showing energy contribution from Protein (4 kcal/g), Fat (9 kcal/g), CHO (4 kcal/g).
       </div>
     </div>
   </div>
@@ -514,13 +543,14 @@ def _generate_diet_report(request: Request, ingredients: List[str]):
   </script>
 
   <script>
+    Chart.register(ChartDataLabels);
     const ctx = document.getElementById('macroPie').getContext('2d');
     new Chart(ctx, {{
       type: 'pie',
       data: {{
         labels: ['Protein', 'Fat', 'CHO'],
         datasets: [{{
-          data: [{protein_pct:.2f}, {fat_pct:.2f}, {cho_pct:.2f}],
+          data: [{protein_energy_pct:.2f}, {fat_energy_pct:.2f}, {cho_energy_pct:.2f}],
           backgroundColor: [
             '#4CAF50',
             '#FF9800',
@@ -534,7 +564,7 @@ def _generate_diet_report(request: Request, ingredients: List[str]):
         responsive: true,
         plugins: {{
           legend: {{ position: 'bottom' }},
-          title: {{ display: true, text: 'Macronutrient Composition (% of DM)' }},
+          title: {{ display: true, text: 'Energy Contribution (% of Total kcal)' }},
           datalabels: {{
             formatter: (value) => value.toFixed(1) + '%',
             color: '#ffffff',
@@ -689,6 +719,7 @@ def _generate_ingredients_summary(ingredients: List[str]):
       margin-bottom: 18px;
       font-size: 14px;
     }}
+    /* --- Tab bar --- */
     .tab-bar {{
       display: flex;
       border-bottom: 2px solid #2e7d32;
@@ -716,6 +747,7 @@ def _generate_ingredients_summary(ingredients: List[str]):
     }}
     .tab-panel {{ display: none; }}
     .tab-panel.active {{ display: block; }}
+    /* --- Shared table styles --- */
     table {{
       width: 100%;
       border-collapse: collapse;
@@ -745,6 +777,7 @@ def _generate_ingredients_summary(ingredients: List[str]):
     }}
     .total-row {{ background-color: #e8f5e9; border-top: 2px solid #2e7d32; }}
     .total-row td {{ border-bottom: none; }}
+    /* --- Note / formula boxes --- */
     .note {{
       margin-top: 18px;
       padding: 14px;
@@ -783,6 +816,7 @@ def _generate_ingredients_summary(ingredients: List[str]):
       gap: 8px;
     }}
     .print-btn:hover {{ background: linear-gradient(135deg, #1b5e20 0%, #2e7d32 100%); }}
+    /* --- Daily Feeding Plan specific --- */
     .energy-panel {{
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -862,6 +896,7 @@ def _generate_ingredients_summary(ingredients: List[str]):
     <h1>🥗 Ingredients Summary</h1>
     <div class="subtitle">Fresh weights and daily feeding plan for your homemade dog diet recipe</div>
 
+    <!-- Tab bar -->
     <div class="tab-bar">
       <button class="tab-btn active" onclick="switchTab('summary', this)">📋 Ingredients Summary</button>
       <button class="tab-btn" onclick="switchTab('feeding', this)">🐾 Daily Feeding Plan</button>
@@ -898,6 +933,7 @@ def _generate_ingredients_summary(ingredients: List[str]):
     <!-- Tab 2: Daily Feeding Plan -->
     <div id="tab-feeding" class="tab-panel">
 
+      <!-- Input row -->
       <div class="energy-panel">
         <div class="energy-card">
           <label>🐕 Dog Daily Energy Need (kcal)</label>
@@ -911,6 +947,7 @@ def _generate_ingredients_summary(ingredients: List[str]):
         </div>
       </div>
 
+      <!-- Derived summary row (hidden until user types) -->
       <div class="derived-row" id="derivedRow">
         <div class="derived-item">
           <div class="derived-label">Dog daily energy need</div>
@@ -930,6 +967,7 @@ def _generate_ingredients_summary(ingredients: List[str]):
         </div>
       </div>
 
+      <!-- Per-ingredient batch tables -->
       <div id="planSection" style="display:none">
         <div class="plan-title">🥩 Fresh weight to serve per batch (g)</div>
         <table class="days-table">
@@ -956,11 +994,12 @@ def _generate_ingredients_summary(ingredients: List[str]):
       <div id="energyHint" style="margin-top:18px;color:#888;font-size:13px;">
         ↑ Enter your dog's daily energy need above to generate the feeding plan.
       </div>
-    </div>
+    </div><!-- /tab-feeding -->
 
-  </div>
+  </div><!-- /container -->
 
 <script>
+  // ---- Tab switching ----
   function switchTab(id, btn) {{
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -968,9 +1007,11 @@ def _generate_ingredients_summary(ingredients: List[str]):
     btn.classList.add('active');
   }}
 
-  const DIET_ENERGY = {diet_energy_kcal_per_kg:.6f};
-  const TOTAL_DM    = {total_dm_weight:.6f};
+  // ---- Server-computed data ----
+  const DIET_ENERGY = {diet_energy_kcal_per_kg:.6f};  // kcal/kg DM
+  const TOTAL_DM    = {total_dm_weight:.6f};           // g DM in full batch
 
+  // [name, dm_g, fresh_weight_g, water_pct]
   const INGREDIENTS = [
 {chr(10).join(
     '    ["' + item.get("ingredient","").replace(chr(34), chr(92)+chr(34)) + '", '
@@ -1005,6 +1046,7 @@ def _generate_ingredients_summary(ingredients: List[str]):
     document.getElementById('dv_pct').textContent         = pct.toFixed(2) + '%';
     hint.style.display = 'none';
 
+    // Build per-ingredient rows — fresh AND dry matter
     const days = [1, 3, 5, 7, 10];
     let tbodyFresh = '';
     const totalsFresh = [0,0,0,0,0];
@@ -1015,10 +1057,11 @@ def _generate_ingredients_summary(ingredients: List[str]):
       const ingDailyDM    = frac * dailyDM;
       const wf            = water_pct / 100.0;
       let ingDailyFresh   = wf < 1.0 ? ingDailyDM / (1.0 - wf) : ingDailyDM;
-      // EXCEPTION: Oyster canned applies a proportional scaling correction of 10/14.9
-      // for this batch table only. water_pct (85.1) is read and used completely unchanged;
-      // the CSV is never modified. This scales the result down to reflect an 11g DM basis
-      // instead of 14.9g, while keeping the value dynamic with the dog's energy needs.
+      // EXCEPTION: Oyster canned's result is scaled by 10/14.9 for this batch table only,
+      // anchoring the calc on 10 instead of the CSV's 14.9. water_pct (85.1) is read and
+      // used completely unchanged; the CSV itself is never touched. The scaling is applied
+      // only after the standard formula runs, so the value still scales dynamically with
+      // the dog's daily energy needs.
       if (name === "oyster canned") {{
         ingDailyFresh = ingDailyFresh * (10.0 / 14.9);
       }}
@@ -1109,7 +1152,7 @@ def _generate_aafco_report(ingredients: List[str]):
             ("Iron (Fe)", "mg/kg DM", "iron_mg_kg", "iron", 40.0),
             ("Zinc (Zn)", "mg/kg DM", "zn_mg_kg", "zinc", 80.0),
             ("Copper (Cu)", "mg/kg DM", "cu_mg_kg", "copper", 7.3),
-            ("Iodine (I)", "mg/kg DM", "iodine_mg_kg", "iodine", 1.0),
+            ("Iodine (I)", "mg/kg DM", "iodine_mg_kg", "iodine", 1.5),
             ("Selenium (Se)", "mg/kg DM", "se_mg_kg", "selenium", 0.35),
         ],
         "Vitamins": [
@@ -1358,7 +1401,7 @@ def _generate_aafco_report(ingredients: List[str]):
 </head>
 <body>
   <div class="container">
-    <h1>Dog Diet Planner - Grain Free</h1>
+    <h1>🐕 AAFCO Adult Maintenance - Complete Nutrient Analysis</h1>
     <div class="subtitle">Comprehensive analysis of all 43+ tracked nutrients with AAFCO 2024 standards</div>
     
     <div class="chips">

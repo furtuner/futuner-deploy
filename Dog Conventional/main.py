@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from routers.diet_router import router
+from routers.report_email_router import router as report_email_router
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -25,6 +26,7 @@ def root():
     return {"message": "Dog Diet Planner API is running"}
 
 app.include_router(router)
+app.include_router(report_email_router)
 
 if __name__ == "__main__":
     import uvicorn
