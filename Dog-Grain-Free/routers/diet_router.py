@@ -84,6 +84,10 @@ def user_ingredients():
             result.append(
                 {
                     "ingredient_name": item["ingredient_name"],
+                    "group_name": display_name,
+                }
+            )
+
     # Cached for an hour at Vercel's CDN/edge — this list only changes when the
     # CSVs are updated and the app is redeployed, so there's no reason for every
     # page load to re-run this function. stale-while-revalidate means a visitor
