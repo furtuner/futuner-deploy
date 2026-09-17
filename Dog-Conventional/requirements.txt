@@ -4,3 +4,4 @@ pandas
 pydantic
 requests
 email-validator
+vercel_blob
