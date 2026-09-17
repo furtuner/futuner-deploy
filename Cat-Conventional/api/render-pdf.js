@@ -1,46 +1,41 @@
 // api/render-pdf.js
 //
 // A Vercel Node.js serverless function that renders arbitrary HTML to a PDF
-// using REAL headless Chromium — via @sparticuz/chromium + puppeteer-core.
-// Both are just npm packages (no signup, no API key, no third-party
-// service): @sparticuz/chromium ships a Chromium binary compressed small
-// enough to fit inside a serverless function's size limit, which is exactly
-// why this pattern is the standard way to do "Puppeteer on Vercel/Lambda".
+// using REAL headless Chromium — via @sparticuz/chromium-min + puppeteer-core.
 //
-// Because it's a real browser, page.pdf() here produces the same output as
-// a user's own browser Print/Save — same fonts, same @media print rules,
-// same watermark — not an approximation.
-//
-// ─── This lives in ONE Vercel project alongside your existing Python
-//     functions. Vercel auto-detects the runtime per file extension, so a
-//     .py file in /api uses the Python runtime and this .js file uses the
-//     Node runtime — no vercel.json changes needed for that part.
+// NOTE: this uses the "-min" variant of @sparticuz/chromium, not the
+// regular package. The regular package assumes the host OS already
+// provides certain shared libraries (libnss3.so, etc.) — true on AWS
+// Lambda, but not reliably true on Vercel's Node.js runtime, which is
+// what caused "libnss3.so: cannot open shared object file" errors here.
+// The "-min" variant downloads a complete pack (Chromium + every shared
+// library it needs) from GitHub at cold start instead of assuming the
+// host provides them, which fixes that class of error at the cost of a
+// slightly slower cold start on the first request after a deploy.
 //
 // ─── package.json (add to this project, next to your Python requirements.txt):
 //     {
 //       "dependencies": {
-//         "@sparticuz/chromium": "^123.0.0",
-//         "puppeteer-core": "^22.0.0"
+//         "@sparticuz/chromium-min": "^131.0.1",
+//         "puppeteer-core": "^23.11.1"
 //       }
 //     }
-//     Check npm for the current @sparticuz/chromium version and use the
-//     puppeteer-core version its README says it's tested against — the
-//     bundled Chromium binary version and puppeteer-core version need to
-//     be a matching pair.
+//     If you bump the version, update CHROMIUM_PACK_URL below to match —
+//     the pack URL's version must match the installed package version.
 //
-// ─── Recommended vercel.json addition (this function needs more time/
-//     memory than the Vercel free-tier default; requires a Pro plan or
-//     higher for the extended duration):
-//     {
-//       "functions": {
-//         "api/render-pdf.js": { "memory": 1024, "maxDuration": 30 }
-//       }
-//     }
+// ─── Recommended vercel.json addition (already present in this project's
+//     vercel.json, inside the render-pdf.js build's "config" object):
+//     { "memory": 1024, "maxDuration": 30 }
+//     Requires a Vercel Pro plan or higher for maxDuration above 10s.
 
-const chromium = require("@sparticuz/chromium");
+const chromium = require("@sparticuz/chromium-min");
 const puppeteer = require("puppeteer-core");
 
 const MAX_HTML_BYTES = 5_000_000; // ~5MB sanity cap
+
+// Must match the @sparticuz/chromium-min version in package.json.
+const CHROMIUM_PACK_URL =
+  "https://github.com/Sparticuz/chromium/releases/download/v131.0.1/chromium-v131.0.1-pack.tar";
 
 module.exports = async (req, res) => {
   if (req.method !== "POST") {
@@ -62,7 +57,7 @@ module.exports = async (req, res) => {
   try {
     browser = await puppeteer.launch({
       args: chromium.args,
-      executablePath: await chromium.executablePath(),
+      executablePath: await chromium.executablePath(CHROMIUM_PACK_URL),
       headless: chromium.headless,
     });
 
