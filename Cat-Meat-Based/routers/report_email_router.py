@@ -45,7 +45,7 @@ attachment header, so it renders inline exactly like any other webpage.
     SMTP_PORT               e.g. 587
     SMTP_USER               the SMTP username
     SMTP_PASSWORD           the SMTP password / app password / API key
-    FROM_EMAIL              "from" address shown to recipients (defaults to noreply@furtuner.com)
+    FROM_EMAIL              "from" address shown to recipients (defaults to no-reply@furtuner.com)
     FROM_NAME               optional display name, e.g. "FurTuner"
     REPLY_TO                optional; if set, replies go here (e.g. help@furtuner.com).
                             Leave unset to send as a true no-reply.
@@ -85,7 +85,7 @@ SMTP_HOST = os.environ.get("SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
-FROM_EMAIL = os.environ.get("FROM_EMAIL", "noreply@furtuner.com")
+FROM_EMAIL = os.environ.get("FROM_EMAIL", "no-reply@furtuner.com")
 FROM_NAME = os.environ.get("FROM_NAME", "FurTuner")
 REPLY_TO = os.environ.get("REPLY_TO", "")  # empty = true no-reply
 
@@ -268,7 +268,7 @@ def send_report_link_email(to_address: str, subject: str, plain_body: str, html_
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = formataddr((FROM_NAME, FROM_EMAIL))  # -> FurTuner <noreply@furtuner.com>
+    msg["From"] = formataddr((FROM_NAME, FROM_EMAIL))  # -> FurTuner <no-reply@furtuner.com>
     msg["To"] = to_address
     if REPLY_TO:
         msg["Reply-To"] = REPLY_TO
