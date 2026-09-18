@@ -45,8 +45,14 @@ attachment header, so it renders inline exactly like any other webpage.
     SMTP_PORT               e.g. 587
     SMTP_USER               the SMTP username
     SMTP_PASSWORD           the SMTP password / app password / API key
-    FROM_EMAIL              "from" address shown to recipients (defaults to SMTP_USER)
+    FROM_EMAIL              "from" address shown to recipients (defaults to noreply@furtuner.com)
     FROM_NAME               optional display name, e.g. "FurTuner"
+    REPLY_TO                optional; if set, replies go here (e.g. help@furtuner.com).
+                            Leave unset to send as a true no-reply.
+    SUPPORT_URL             optional; full https URL of the Support page on the website
+                            (opened by the "Support page" link in the email footer)
+    EMAIL_LOGO_URL          optional; public https URL of the logo banner PNG used in the
+                            email (defaults to https://furtuner.com/images/furtuner-email-logo.png)
 """
 
 import os
@@ -57,6 +63,8 @@ import uuid
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr
+from html import escape as html_escape
 from urllib.parse import quote, urlparse
 
 import requests
@@ -75,8 +83,17 @@ SMTP_HOST = os.environ.get("SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
-FROM_EMAIL = os.environ.get("FROM_EMAIL", SMTP_USER)
+FROM_EMAIL = os.environ.get("FROM_EMAIL", "noreply@furtuner.com")
 FROM_NAME = os.environ.get("FROM_NAME", "FurTuner")
+REPLY_TO = os.environ.get("REPLY_TO", "")  # empty = true no-reply
+
+SITE_URL = "https://furtuner.com"
+# Where the "Questions? Visit our Support page" link in the email footer goes.
+# The site (App.tsx) opens its Support screen directly when it loads with ?page=support.
+SUPPORT_URL = os.environ.get("SUPPORT_URL", f"{SITE_URL}/?page=support")
+# Gmail/Outlook can't show SVG, so this must be a PNG hosted at a public URL.
+# Drop furtuner-email-logo.png into the site's public/images/ folder.
+EMAIL_LOGO_URL = os.environ.get("EMAIL_LOGO_URL", f"{SITE_URL}/images/furtuner-email-logo.png")
 
 MAX_HTML_BYTES = 5_000_000  # ~5MB sanity cap on the incoming report HTML
 RETENTION_DAYS = 30  # reports older than this are auto-deleted by /report/cleanup
@@ -114,6 +131,121 @@ def upload_report(html: str, patient_name: str) -> str:
     return url
 
 
+# ─── Email content ───────────────────────────────────────────────────────
+def build_email_bodies(patient_name: str, view_url: str) -> tuple[str, str]:
+    """Returns (plain_text, html) for the "your report is ready" email.
+
+    Layout: centered card on a light background -> italic thank-you + message ->
+    orange button -> small note -> FurTuner logo banner -> footer. Table-based
+    with inline styles on purpose: that's the only layout Gmail/Outlook render
+    reliably. patient_name is user input, so it is HTML-escaped before use.
+    """
+    name = html_escape(patient_name)
+    url = html_escape(view_url, quote=True)
+    logo = html_escape(EMAIL_LOGO_URL, quote=True)
+    support = html_escape(SUPPORT_URL, quote=True)
+
+    plain = (
+        "Thank you for visiting FurTuner.\n\n"
+        f"Your custom diet report for {patient_name} is ready.\n\n"
+        f"View it here: {view_url}\n\n"
+        "This link opens in your browser - no download needed.\n\n"
+        "--\n"
+        f"Questions? Visit our Support page: {SUPPORT_URL}\n"
+        "This is an automated message, please do not reply.\n"
+        f"FurTuner - {SITE_URL}\n"
+    )
+
+    font = "Arial, Helvetica, sans-serif"
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light only">
+<meta name="supported-color-schemes" content="light only">
+<title>Your FurTuner diet report</title>
+</head>
+<body style="margin:0; padding:0; background-color:#F3F7FA;">
+  <!-- Preview text shown next to the subject in the inbox list -->
+  <div style="display:none; max-height:0; overflow:hidden; opacity:0; color:#F3F7FA; font-size:1px; line-height:1px;">
+    Thank you for visiting FurTuner &mdash; your custom diet report for {name} is ready.
+  </div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#F3F7FA" style="background-color:#F3F7FA;">
+    <tr>
+      <td align="center" style="padding:28px 12px;">
+
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF"
+               style="width:100%; max-width:600px; margin:0 auto; background-color:#FFFFFF; border-radius:14px; border:1px solid #DCE9F3;">
+
+          <!-- Message -->
+          <tr>
+            <td align="center" style="padding:44px 36px 8px 36px; font-family:{font}; text-align:center;">
+              <p style="margin:0 0 14px 0; font-size:22px; line-height:1.4; font-style:italic; font-weight:700; color:#143C6F;">
+                Thank you for visiting FurTuner.
+              </p>
+              <p style="margin:0; font-size:17px; line-height:1.6; font-style:italic; color:#211915;">
+                Your custom diet report for <strong>{name}</strong> is ready.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Button -->
+          <tr>
+            <td align="center" style="padding:26px 36px 8px 36px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+                <tr>
+                  <td align="center" bgcolor="#FA9A36" style="background-color:#FA9A36; border-radius:10px;">
+                    <a href="{url}" target="_blank"
+                       style="display:inline-block; padding:15px 32px; font-family:{font}; font-size:16px; font-weight:700; color:#211915; text-decoration:none; border-radius:10px;">
+                      View {name}&#8217;s Diet Report
+                    </a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Note -->
+          <tr>
+            <td align="center" style="padding:14px 36px 36px 36px; font-family:{font}; text-align:center;">
+              <p style="margin:0; font-size:13px; line-height:1.5; font-style:italic; color:#6B7785;">
+                This link opens in your browser &mdash; no download needed.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Logo banner (light-blue bar is baked into the PNG so it looks right in dark mode too) -->
+          <tr>
+            <td align="center" bgcolor="#E8F5FF"
+                style="background-color:#E8F5FF; border-radius:0 0 13px 13px; font-family:{font}; font-size:26px; font-weight:700; color:#143C6F; line-height:1;">
+              <img src="{logo}" width="600" alt="FurTuner"
+                   style="display:block; width:100%; max-width:600px; height:auto; border:0; outline:none; text-decoration:none; border-radius:0 0 13px 13px;">
+            </td>
+          </tr>
+
+        </table>
+
+        <!-- Footer -->
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%; max-width:600px; margin:0 auto;">
+          <tr>
+            <td align="center" style="padding:20px 20px 0 20px; font-family:{font}; font-size:12px; line-height:1.7; color:#6B7785; text-align:center;">
+              Questions? Visit our <a href="{support}" target="_blank" style="color:#143C6F; text-decoration:underline;">Support page</a><br>
+              This is an automated message, please do not reply.<br>
+              <a href="{SITE_URL}" style="color:#143C6F; text-decoration:underline;">furtuner.com</a>
+            </td>
+          </tr>
+        </table>
+
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+    return plain, html
+
+
 # ─── Sending ─────────────────────────────────────────────────────────────
 def send_report_link_email(to_address: str, subject: str, plain_body: str, html_body: str) -> None:
     if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD:
@@ -124,10 +256,13 @@ def send_report_link_email(to_address: str, subject: str, plain_body: str, html_
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = f"{FROM_NAME} <{FROM_EMAIL}>"
+    msg["From"] = formataddr((FROM_NAME, FROM_EMAIL))  # -> FurTuner <noreply@furtuner.com>
     msg["To"] = to_address
-    msg.attach(MIMEText(plain_body, "plain"))
-    msg.attach(MIMEText(html_body, "html"))
+    if REPLY_TO:
+        msg["Reply-To"] = REPLY_TO
+    # Explicit UTF-8 so accents / dashes / curly quotes can never be mis-decoded.
+    msg.attach(MIMEText(plain_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     context = ssl.create_default_context()
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
@@ -151,21 +286,12 @@ def email_report(req: ReportEmailRequest):
     # not the Blob URL directly — see the module docstring for why.
     view_url = f"{BASE_URL}/report/view?src={quote(blob_url, safe='')}"
 
-    subject = f"Diet Report for {req.patient_name}"
+    # Collapse whitespace/newlines so a pet name can never inject extra email
+    # headers via the Subject line, and keep it a sensible length.
+    clean_name = " ".join(req.patient_name.split())[:80] or "Your Pet"
+    subject = f"Diet Report for {clean_name}"
 
-    plain_body = (
-        f"Your diet report for {req.patient_name} is ready.\n\n"
-        f"View it here: {view_url}\n\n"
-        "This link opens directly in your browser — no download needed."
-    )
-
-    html_body = f"""
-    <div style="font-family: Arial, Helvetica, sans-serif; font-size: 15px; color: #211915; line-height: 1.6;">
-      <p>Your diet report for <strong>{req.patient_name}</strong> is ready — 
-      <a href="{view_url}" style="color: #143C6F; font-weight: 700;">click here to view it</a>.</p>
-      <p style="color: #666; font-size: 13px;">This link opens directly in your browser — no download needed.</p>
-    </div>
-    """
+    plain_body, html_body = build_email_bodies(clean_name, view_url)
 
     try:
         send_report_link_email(req.recipient_email, subject, plain_body, html_body)
@@ -193,7 +319,12 @@ def view_report(src: str = Query(...)):
     # No Content-Disposition set here at all, so the browser renders this
     # inline like any normal webpage — this is the whole point of proxying
     # through here instead of linking straight to the Blob URL.
-    return HTMLResponse(content=resp.text)
+    #
+    # IMPORTANT: use resp.content (raw bytes) and decode as UTF-8 ourselves.
+    # resp.text would guess the charset, and `requests` falls back to
+    # ISO-8859-1 whenever the response has no explicit charset. That silently
+    # turned UTF-8 bytes for "•" and "—" into "â¢" / "â" (mojibake).
+    return HTMLResponse(content=resp.content.decode("utf-8", errors="replace"))
 
 
 # ─── Route: delete reports older than RETENTION_DAYS ─────────────────────
