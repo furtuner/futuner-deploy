@@ -49,10 +49,12 @@ attachment header, so it renders inline exactly like any other webpage.
     FROM_NAME               optional display name, e.g. "FurTuner"
     REPLY_TO                optional; if set, replies go here (e.g. help@furtuner.com).
                             Leave unset to send as a true no-reply.
-    SUPPORT_URL             optional; full https URL of the Support page on the website
-                            (opened by the "Support page" link in the email footer)
-    EMAIL_LOGO_URL          optional; public https URL of the logo banner PNG used in the
-                            email (defaults to https://furtuner.com/images/furtuner-email-logo.png)
+
+The Support page and logo banner links in the email are built from the
+request's site_url field (see ReportEmailRequest below) when the frontend
+sends one — this makes them point at furtuner.com in production or the
+*.vercel.app URL while testing, automatically. If site_url isn't sent, or
+isn't a plausible http(s) URL, they fall back to SITE_URL below.
 """
 
 import os
@@ -87,13 +89,7 @@ FROM_EMAIL = os.environ.get("FROM_EMAIL", "noreply@furtuner.com")
 FROM_NAME = os.environ.get("FROM_NAME", "FurTuner")
 REPLY_TO = os.environ.get("REPLY_TO", "")  # empty = true no-reply
 
-SITE_URL = "https://furtuner.com"
-# Where the "Questions? Visit our Support page" link in the email footer goes.
-# The site (App.tsx) opens its Support screen directly when it loads with ?page=support.
-SUPPORT_URL = os.environ.get("SUPPORT_URL", f"{SITE_URL}/?page=support")
-# Gmail/Outlook can't show SVG, so this must be a PNG hosted at a public URL.
-# Drop furtuner-email-logo.png into the site's public/images/ folder.
-EMAIL_LOGO_URL = os.environ.get("EMAIL_LOGO_URL", f"{SITE_URL}/images/furtuner-email-logo.png")
+SITE_URL = "https://furtuner.com"  # fallback default if a request doesn't send site_url
 
 MAX_HTML_BYTES = 5_000_000  # ~5MB sanity cap on the incoming report HTML
 RETENTION_DAYS = 30  # reports older than this are auto-deleted by /report/cleanup
@@ -109,6 +105,12 @@ class ReportEmailRequest(BaseModel):
     recipient_email: EmailStr
     patient_name: str
     report_html: str
+    # Optional: the frontend sends window.location.origin here so the
+    # logo/watermark/Support links in the email point at whichever domain
+    # is actually serving the site right now — furtuner.com in production,
+    # or the *.vercel.app URL while testing — instead of a fixed value.
+    # Falls back to SITE_URL below if not provided or not a plausible URL.
+    site_url: str | None = None
 
 
 # ─── Upload the report and get a public URL back ─────────────────────────
@@ -132,18 +134,28 @@ def upload_report(html: str, patient_name: str) -> str:
 
 
 # ─── Email content ───────────────────────────────────────────────────────
-def build_email_bodies(patient_name: str, view_url: str) -> tuple[str, str]:
+def build_email_bodies(patient_name: str, view_url: str, site_url: str | None = None) -> tuple[str, str]:
     """Returns (plain_text, html) for the "your report is ready" email.
 
     Layout: centered card on a light background -> italic thank-you + message ->
     orange button -> small note -> FurTuner logo banner -> footer. Table-based
     with inline styles on purpose: that's the only layout Gmail/Outlook render
     reliably. patient_name is user input, so it is HTML-escaped before use.
+
+    site_url overrides SITE_URL for building the logo/support/footer links
+    below — used so a test sent from the *.vercel.app URL gets links that
+    actually resolve there, instead of always pointing at furtuner.com.
+    Only accepted if it looks like a real http(s) URL; anything else (a
+    missing value, a typo, something unexpected) falls back to SITE_URL.
     """
+    resolved_site_url = site_url if site_url and re.match(r"^https?://", site_url) else SITE_URL
+    resolved_support_url = f"{resolved_site_url}/?page=support"
+    resolved_logo_url = f"{resolved_site_url}/images/furtuner-email-logo.png"
+
     name = html_escape(patient_name)
     url = html_escape(view_url, quote=True)
-    logo = html_escape(EMAIL_LOGO_URL, quote=True)
-    support = html_escape(SUPPORT_URL, quote=True)
+    logo = html_escape(resolved_logo_url, quote=True)
+    support = html_escape(resolved_support_url, quote=True)
 
     plain = (
         "Thank you for visiting FurTuner.\n\n"
@@ -151,9 +163,9 @@ def build_email_bodies(patient_name: str, view_url: str) -> tuple[str, str]:
         f"View it here: {view_url}\n\n"
         "This link opens in your browser - no download needed.\n\n"
         "--\n"
-        f"Questions? Visit our Support page: {SUPPORT_URL}\n"
+        f"Questions? Visit our Support page: {resolved_support_url}\n"
         "This is an automated message, please do not reply.\n"
-        f"FurTuner - {SITE_URL}\n"
+        f"FurTuner - {resolved_site_url}\n"
     )
 
     font = "Arial, Helvetica, sans-serif"
@@ -233,7 +245,7 @@ def build_email_bodies(patient_name: str, view_url: str) -> tuple[str, str]:
             <td align="center" style="padding:20px 20px 0 20px; font-family:{font}; font-size:12px; line-height:1.7; color:#6B7785; text-align:center;">
               Questions? Visit our <a href="{support}" target="_blank" style="color:#143C6F; text-decoration:underline;">Support page</a><br>
               This is an automated message, please do not reply.<br>
-              <a href="{SITE_URL}" style="color:#143C6F; text-decoration:underline;">furtuner.com</a>
+              <a href="{resolved_site_url}" style="color:#143C6F; text-decoration:underline;">furtuner.com</a>
             </td>
           </tr>
         </table>
@@ -291,7 +303,7 @@ def email_report(req: ReportEmailRequest):
     clean_name = " ".join(req.patient_name.split())[:80] or "Your Pet"
     subject = f"Diet Report for {clean_name}"
 
-    plain_body, html_body = build_email_bodies(clean_name, view_url)
+    plain_body, html_body = build_email_bodies(clean_name, view_url, req.site_url)
 
     try:
         send_report_link_email(req.recipient_email, subject, plain_body, html_body)
